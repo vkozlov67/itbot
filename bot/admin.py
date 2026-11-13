@@ -77,6 +77,9 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         "",
         f"Ответы (Grok): <code>{esc(app.chat_model())}</code>",
         f"Расшифровка (OpenAI): <code>{esc(app.cfg.stt_model)}</code>",
+        "Режим приватности бота: "
+        + ("выключен ✅ (видит все сообщения в группах)" if app.me.can_read_all_group_messages
+           else "включён — в группах, где бот не админ, он видит только /ask и ответы на свои сообщения"),
         "Cookies для скачивания: "
         + (", ".join(esc(d) for d in cookie_domains(app.cookies_path)[:6]) or "нет"
            if app.cookies_path.exists() else "нет"),
@@ -87,11 +90,24 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         f"💬 {total.llm_requests} ({fmt_tokens(total.input_tokens + total.output_tokens)} ток.)",
         "",
     ]
+    blind = [c for c in chats if c.enabled and not c.is_admin and not app.me.can_read_all_group_messages]
+    if blind:
+        lines += [
+            "⚠️ Бот не админ в: " + ", ".join(f"<b>{esc(c.title)}</b>" for c in blind)
+            + ". Там он не видит упоминаний и голосовых. Сделайте его админом "
+            "или выключите Group Privacy в @BotFather и добавьте бота заново.",
+            "",
+        ]
     if chats:
-        lines.append("<b>Чаты</b> — ✅ работает, ⏸ выключен. Нажмите, чтобы настроить:")
+        lines.append("<b>Чаты</b> — ✅ работает, ⏸ выключен, ⚠️ не видит сообщений. Нажмите, чтобы настроить:")
     else:
         lines.append("Бот пока не добавлен ни в один чат. Нажмите «➕ Добавить в группу».")
-    rows = [[btn(f"{'✅' if c.enabled else '⏸'} {c.title or c.chat_id}"[:60], a="chat", c=c.chat_id)] for c in chats]
+    def mark(c: ChatRow) -> str:
+        if not c.enabled:
+            return "⏸"
+        return "⚠️" if c in blind else "✅"
+
+    rows = [[btn(f"{mark(c)} {c.title or c.chat_id}"[:60], a="chat", c=c.chat_id)] for c in chats]
     rows.append([InlineKeyboardButton(text="➕ Добавить в группу", url=app.add_to_group_link())])
     rows.append([btn("🤖 Модель", a="models"), btn("🍪 Cookies", a="cookies")])
     rows.append([btn("🔄 Обновить", a="home")])
@@ -117,6 +133,24 @@ async def _refresh_chat(bot: Bot, app: App, row: ChatRow) -> ChatRow:
     except TelegramAPIError as exc:
         log.warning("refresh chat %s failed: %s", row.chat_id, exc)
     return app.db.get_chat(row.chat_id) or row
+
+
+async def check_chats_on_start(bot: Bot, app: App) -> None:
+    """Sync the bot's real status in every chat and warn the owner about chats where it can't see messages."""
+    for row in app.db.list_chats():
+        await _refresh_chat(bot, app, row)
+    if app.me.can_read_all_group_messages:
+        return
+    blind = [c for c in app.db.list_chats() if c.enabled and not c.is_admin]
+    if blind:
+        await app.notify_owner(
+            bot,
+            "⚠️ В этих чатах я не администратор и поэтому не вижу упоминаний, вопросов и голосовых: "
+            + ", ".join(f"<b>{esc(c.title)}</b>" for c in blind)
+            + "\n\nСделайте меня админом там (права можно не давать) — или в @BotFather: /mybots → бот → "
+            "Bot Settings → Group Privacy → Turn off, после чего удалите и снова добавьте меня в чат.",
+            throttle_key="blind-chats",
+        )
 
 
 async def _owner_role(bot: Bot, app: App, chat_id: int) -> str:

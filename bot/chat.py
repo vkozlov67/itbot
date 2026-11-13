@@ -282,6 +282,7 @@ def _history_block(app: App, history: list[StoredMessage]) -> str:
 async def answer(bot: Bot, app: App, message: Message, question: str, *, place: str) -> None:
     chat_id = message.chat.id
     user = message.from_user
+    log.info("question in %s from %s: %.80r", chat_id, user.id if user else None, question)
     if user and not app.is_owner(user) and not app.limiter.allow((chat_id, user.id)):
         await send_reply(bot, message, "⏳ Слишком много вопросов подряд — подождите минуту.")
         return
