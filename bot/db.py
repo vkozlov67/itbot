@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS chats (
     enabled    INTEGER NOT NULL DEFAULT 0,
     transcribe INTEGER NOT NULL DEFAULT 1,
     answer     INTEGER NOT NULL DEFAULT 1,
+    download   INTEGER NOT NULL DEFAULT 1,
     added_by   INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -49,7 +50,7 @@ CREATE TABLE IF NOT EXISTS usage (
 """
 
 ACTIVE_STATUSES = ("creator", "administrator", "member", "restricted")
-CHAT_FLAGS = ("enabled", "transcribe", "answer")
+CHAT_FLAGS = ("enabled", "transcribe", "answer", "download")
 HISTORY_KEEP = 300
 
 
@@ -63,6 +64,7 @@ class ChatRow:
     enabled: bool
     transcribe: bool
     answer: bool
+    download: bool
     added_by: int | None
 
     @property
@@ -107,6 +109,12 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(chats)")}
+        if "download" not in cols:
+            self._conn.execute("ALTER TABLE chats ADD COLUMN download INTEGER NOT NULL DEFAULT 1")
 
     def close(self) -> None:
         self._conn.close()
@@ -140,6 +148,7 @@ class Database:
             enabled=bool(row["enabled"]),
             transcribe=bool(row["transcribe"]),
             answer=bool(row["answer"]),
+            download=bool(row["download"]),
             added_by=row["added_by"],
         )
 
@@ -208,8 +217,8 @@ class Database:
                 self._conn.execute("UPDATE chats SET chat_id=? WHERE chat_id=?", (new_id, old_id))
             else:
                 self._conn.execute(
-                    "UPDATE chats SET enabled=?, transcribe=?, answer=? WHERE chat_id=?",
-                    (int(old.enabled), int(old.transcribe), int(old.answer), new_id),
+                    "UPDATE chats SET enabled=?, transcribe=?, answer=?, download=? WHERE chat_id=?",
+                    (int(old.enabled), int(old.transcribe), int(old.answer), int(old.download), new_id),
                 )
                 self._conn.execute("DELETE FROM chats WHERE chat_id=?", (old_id,))
             self._conn.execute("UPDATE OR IGNORE messages SET chat_id=? WHERE chat_id=?", (new_id, old_id))

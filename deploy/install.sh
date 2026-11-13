@@ -3,9 +3,10 @@
 set -euo pipefail
 cd /opt/itbot
 
-# System packages: venv support.
+# System packages: venv support; ffmpeg merges video+audio streams for yt-dlp.
 NEED=()
 python3 -c 'import ensurepip' >/dev/null 2>&1 || NEED+=(python3-venv)
+command -v ffmpeg >/dev/null 2>&1 || NEED+=(ffmpeg)
 if [ ${#NEED[@]} -gt 0 ]; then
   apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${NEED[@]}"
 fi
@@ -32,7 +33,10 @@ SH
 chmod 755 /usr/local/bin/itbot-setup
 
 install -m 644 deploy/itbot.service /etc/systemd/system/itbot.service
+install -m 644 deploy/itbot-ytdlp-update.service /etc/systemd/system/itbot-ytdlp-update.service
+install -m 644 deploy/itbot-ytdlp-update.timer /etc/systemd/system/itbot-ytdlp-update.timer
 systemctl daemon-reload
+systemctl enable --now itbot-ytdlp-update.timer >/dev/null 2>&1
 
 if [ -f .env ] && grep -q '^BOT_TOKEN=.\+' .env && grep -q '^XAI_API_KEY=.\+' .env \
    && grep -q '^OPENAI_API_KEY=.\+' .env; then

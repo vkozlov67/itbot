@@ -9,7 +9,8 @@ from aiogram.types import Audio, Chat, Message, MessageEntity, User, Voice
 from bot.chat import addressed, kind_of, speech_of, transcript_messages
 from bot.db import Database
 from bot.textutil import md_to_html, split_text
-from bot.apis import APIError, OpenAITranscriber, XAIClient
+from bot.apis import APIError, OpenAITranscriber, XAIClient, to_chat_messages
+from bot.downloader import _classify, cookie_domains, find_links, looks_like_cookies
 
 ME = User(id=999, is_bot=True, first_name="ItBot", username="it_test_bot")
 ALICE = User(id=1, is_bot=False, first_name="Alice")
@@ -209,3 +210,103 @@ def test_xai_chat_retries_then_succeeds(monkeypatch):
 
     r = asyncio.run(run())
     assert (r.text, r.input_tokens, r.output_tokens, calls["n"]) == ("Ответ", 10, 3, 2)
+
+
+def test_xai_respond_with_search_and_sources():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(200, json={
+            "status": "completed",
+            "output": [
+                {"type": "reasoning"},
+                {"type": "web_search_call", "id": "ws_1"},
+                {"type": "message", "role": "assistant", "content": [{
+                    "type": "output_text", "text": "Главное за сегодня: ...",
+                    "annotations": [{"type": "url_citation", "url": "https://www.reuters.com/a", "title": "1"},
+                                    {"type": "url_citation", "url": "https://apnews.com/b", "title": "2"}],
+                }]},
+            ],
+            "usage": {"input_tokens": 1200, "output_tokens": 80,
+                      "server_side_tool_usage_details": {"web_search_calls": 2, "x_search_calls": 1}},
+        })
+
+    async def run():
+        c = _mock(XAIClient("k", "https://api.x.ai/v1"), handler, "https://api.x.ai/v1")
+        r = await c.respond("grok-4.3", [{"role": "user", "content": "погугли новости США"}])
+        await c.close()
+        return r
+
+    r = asyncio.run(run())
+    assert seen["path"] == "/v1/responses"
+    assert [t["type"] for t in seen["body"]["tools"]] == ["web_search", "x_search"]
+    assert seen["body"]["store"] is False and seen["body"]["include"] == ["no_inline_citations"]
+    assert r.text == "Главное за сегодня: ..." and (r.input_tokens, r.output_tokens) == (1200, 80)
+    assert [s.url for s in r.sources] == ["https://www.reuters.com/a", "https://apnews.com/b"]
+    assert r.searches == 3
+
+
+def test_to_chat_messages():
+    items = [{"role": "system", "content": "sys"},
+             {"role": "user", "content": [{"type": "input_text", "text": "q"},
+                                          {"type": "input_image", "image_url": "data:x", "detail": "high"}]}]
+    out = to_chat_messages(items)
+    assert out[0] == {"role": "system", "content": "sys"}
+    assert out[1]["content"] == [{"type": "text", "text": "q"},
+                                 {"type": "image_url", "image_url": {"url": "data:x", "detail": "high"}}]
+
+
+# ---------------- link detection
+def _links(text):
+    import re
+    ents = [MessageEntity(type="url", offset=m.start(), length=m.end() - m.start())
+            for m in re.finditer(r"\S+\.\S+/\S*", text)]
+    return [(l.service, l.url) for l in find_links(msg(text, entities=ents))]
+
+
+def test_find_links_services():
+    assert _links("смотри https://www.instagram.com/reel/Chunk8-jurw/?igsh=abc") == [
+        ("Instagram", "https://www.instagram.com/reel/Chunk8-jurw/?igsh=abc")]
+    assert _links("instagram.com/p/BQ0eAlwhDrw/")[0][0] == "Instagram"
+    assert _links("https://vt.tiktok.com/ZSabc123/")[0][0] == "TikTok"
+    assert _links("https://youtube.com/shorts/sSM9J5YH_60")[0][0] == "YouTube"
+    assert _links("https://x.com/user/status/1575560063510810624")[0][0] == "X"
+    assert _links("https://vk.com/clip30014565_456240946")[0][0] == "VK"
+    assert _links("https://www.facebook.com/reel/1195289147628387")[0][0] == "Facebook"
+    assert _links("https://pin.it/abc123")[0][0] == "Pinterest"
+
+
+def test_find_links_ignores_non_post_links():
+    assert _links("https://www.instagram.com/someprofile/") == []
+    assert _links("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == []
+    assert _links("https://example.com/video/1") == []
+    assert _links("https://x.com/elonmusk") == []
+
+
+def test_find_links_text_link_and_limit():
+    m = msg("тут", entities=[MessageEntity(type="text_link", offset=0, length=3,
+                                           url="https://instagram.com/reel/AAA/")])
+    assert [l.service for l in find_links(m)] == ["Instagram"]
+    many = " ".join(f"https://instagram.com/reel/A{i}/" for i in range(6))
+    assert len(_links(many)) == 3
+
+
+def test_download_error_classification():
+    assert _classify("There is no video in this post") == "no_media"
+    assert _classify("Sign in to confirm you're not a bot") == "auth"
+    assert _classify("Your IP address is blocked from accessing this post") == "blocked"
+    assert _classify("Account authentication is required. Use --cookies") == "auth"
+    assert _classify("something weird") == "failed"
+
+
+def test_cookies_helpers(tmp_path):
+    data = (b"# Netscape HTTP Cookie File\n"
+            b".instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\tabc\n"
+            b"#HttpOnly_.www.tiktok.com\tTRUE\t/\tTRUE\t0\tsid\tx\n")
+    assert looks_like_cookies(data) and not looks_like_cookies(b"hello world")
+    p = tmp_path / "cookies.txt"
+    p.write_bytes(data)
+    assert cookie_domains(p) == ["instagram.com", "tiktok.com"]

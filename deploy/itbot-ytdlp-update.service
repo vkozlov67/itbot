@@ -1,0 +1,8 @@
+[Unit]
+Description=Update yt-dlp for itbot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/itbot/deploy/update-ytdlp.sh

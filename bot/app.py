@@ -44,6 +44,7 @@ class App:
     me: User
     sem: asyncio.Semaphore
     limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=8, window=60))
+    dl_sem: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(2))
     _media_locks: dict[tuple[int, int], asyncio.Lock] = field(default_factory=dict)
     _last_alert: dict[str, float] = field(default_factory=dict)
 
@@ -73,6 +74,10 @@ class App:
     def add_to_group_link(self) -> str:
         # Opens Telegram's "add to group" picker and pre-selects admin rights for the bot.
         return f"https://t.me/{self.me.username}?startgroup=itbot&admin=delete_messages+pin_messages"
+
+    @property
+    def cookies_path(self):
+        return self.cfg.data_dir / "cookies.txt"
 
     def chat_model(self) -> str:
         return self.db.get_setting("chat_model") or self.cfg.chat_model

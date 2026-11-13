@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily yt-dlp update for itbot
+
+[Timer]
+OnCalendar=*-*-* 04:30
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,22 +1,27 @@
 from __future__ import annotations
 
 import base64
+import html
 import logging
 import re
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import Message, User
+from aiogram.types import (
+    FSInputFile, InputMediaPhoto, InputMediaVideo, Message, ReactionTypeEmoji, ReplyParameters, User,
+)
 from aiogram.utils.chat_action import ChatActionSender
 
 from .admin import chat_actions_markup
 from .app import App, send_reply, thread_id
 from .db import StoredMessage
 from .textutil import esc, fmt_duration, md_to_html, split_text
-from .apis import APIError
+from .apis import APIError, ChatResult, to_chat_messages
+from .downloader import Download, DownloadError, Link, download, find_links
 
 log = logging.getLogger(__name__)
 router = Router(name="chat")
@@ -42,7 +47,8 @@ HISTORY_CHAR_BUDGET = 16000
 SYSTEM_PROMPT = """Ты — {name}, умный ассистент в Telegram ({place}). Сейчас {now} ({tz}).
 Отвечай на языке вопроса (по умолчанию по-русски), по существу и без воды. Ты можешь отвечать на любые вопросы: общие знания, советы, тексты, код, переводы, расчёты, а также про обсуждение в чате — голосовые сообщения в истории уже расшифрованы.
 История чата дана только для контекста: используй её, если вопрос касается обсуждения, но не пересказывай без надобности. Сообщения с автором «Ты (бот)» — твои прошлые ответы.
-Если чего-то не знаешь или не уверен — так и скажи, не выдумывай факты, цифры и ссылки. Помни, что у тебя нет доступа к интернету в реальном времени.
+У тебя есть поиск в интернете (web_search) и по X/Twitter (x_search). Обязательно ищи, когда просят «погуглить», «поискать», «найти», и когда вопрос про новости, свежие события, курсы, цены, погоду, расписания, спорт, релизы и всё, что могло измениться после твоего обучения. Для простых вопросов, которые знаешь сам, не ищи. Найденное пересказывай своими словами, кратко, с конкретикой (даты, цифры, кто/что).
+Если чего-то не знаешь и найти не удалось — так и скажи, не выдумывай факты, цифры и ссылки.
 Форматирование: простой Markdown — **жирный**, *курсив*, `код`, блоки ```код```, списки через «- ». Не используй таблицы и заголовки #. Обычно укладывайся в 1500 символов, если не просят подробнее."""
 
 
@@ -218,7 +224,33 @@ async def _photo_part(bot: Bot, message: Message) -> dict | None:
         return None
     assert buf is not None
     b64 = base64.b64encode(buf.getvalue()).decode()
-    return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}}
+    return {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}", "detail": "high"}
+
+
+RETRYABLE_WITHOUT = (400, 404, 422)
+
+
+async def _ask_model(app: App, model: str, items: list[dict], items_no_images: list[dict] | None) -> ChatResult:
+    """Responses API with search; on rejection retry without images, then plain chat completions."""
+    attempts = [items] + ([items_no_images] if items_no_images else [])
+    for attempt in attempts:
+        try:
+            return await app.xai.respond(model, attempt)
+        except APIError as exc:
+            if exc.status not in RETRYABLE_WITHOUT:
+                raise
+            log.warning("responses API rejected request (%s), trying fallback", exc)
+    return await app.xai.chat(model, to_chat_messages(attempts[-1]))
+
+
+def _sources_md(result: ChatResult, limit: int = 5) -> str:
+    if not result.sources:
+        return ""
+    links = []
+    for s in result.sources[:limit]:
+        host = urlparse(s.url).netloc.removeprefix("www.") or "ссылка"
+        links.append(f"[{host}]({s.url})")
+    return "\n\n🔎 " + " · ".join(links)
 
 
 def _history_block(app: App, history: list[StoredMessage]) -> str:
@@ -312,19 +344,12 @@ async def answer(bot: Bot, app: App, message: Message, question: str, *, place: 
         def build(with_images: bool) -> list[dict]:
             content: Any = user_text
             if with_images and images:
-                content = [{"type": "text", "text": user_text}, *images]
+                content = [{"type": "input_text", "text": user_text}, *images]
             return [{"role": "system", "content": system}, {"role": "user", "content": content}]
 
-        model = app.chat_model()
         try:
             async with app.sem:
-                try:
-                    result = await app.xai.chat(model, build(True))
-                except APIError as exc:
-                    if not images or exc.status != 400:
-                        raise
-                    log.warning("model rejected image input, retrying text-only: %s", exc)
-                    result = await app.xai.chat(model, build(False))
+                result = await _ask_model(app, app.chat_model(), build(True), build(False) if images else None)
         except APIError as exc:
             log.error("chat failed in %s: %s", chat_id, exc)
             alert = _alert_if_account_problem(bot, app, exc)
@@ -336,15 +361,116 @@ async def answer(bot: Bot, app: App, message: Message, question: str, *, place: 
     app.db.add_usage(
         chat_id, llm_requests=1, input_tokens=result.input_tokens, output_tokens=result.output_tokens
     )
-    text = result.text or "🤷 Модель вернула пустой ответ."
+    if result.searches:
+        log.info("answer in %s used %d search call(s)", chat_id, result.searches)
+    text = (result.text or "🤷 Модель вернула пустой ответ.") + _sources_md(result)
     for chunk in split_text(text):
         sent = await send_reply(bot, message, md_to_html(chunk), fallback=chunk)
         app.db.add_message(chat_id, sent.message_id, app.me.id, "Бот", "bot", chunk, int(sent.date.timestamp()))
 
 
+# ---------------------------------------------------------------- link downloads
+DL_HINTS = {
+    "auth": "{service} не отдаёт это видео без входа в аккаунт. Пришлите мне в личку файл cookies.txt "
+            "(как его получить — в /panel → 🍪 Cookies).",
+    "blocked": "{service} блокирует сервер бота. Иногда помогает cookies.txt (/panel → 🍪 Cookies).",
+    "failed": "Не получилось скачать по ссылке из {service}.",
+}
+
+
+async def _react(bot: Bot, message: Message, emoji: str | None) -> None:
+    try:
+        await bot.set_message_reaction(
+            chat_id=message.chat.id, message_id=message.message_id,
+            reaction=[ReactionTypeEmoji(emoji=emoji)] if emoji else [],
+        )
+    except TelegramAPIError:
+        pass  # reactions may be disabled in the chat; purely cosmetic
+
+
+async def _send_download(bot: Bot, message: Message, dl: Download) -> Message:
+    caption = f'📥 <a href="{html.escape(dl.link.url, quote=True)}">{dl.link.service}</a>'
+    if dl.uploader and dl.uploader.lower() != dl.link.service.lower():
+        caption += f" · {esc(dl.uploader)}"
+    common: dict[str, Any] = dict(
+        chat_id=message.chat.id,
+        reply_parameters=ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True),
+        request_timeout=300,
+    )
+    if thread_id(message):
+        common["message_thread_id"] = thread_id(message)
+    items = dl.items
+    if len(items) == 1:
+        it = items[0]
+        if it.is_image:
+            try:
+                return await bot.send_photo(photo=FSInputFile(it.path), caption=caption, parse_mode="HTML", **common)
+            except TelegramBadRequest:
+                return await bot.send_document(document=FSInputFile(it.path), caption=caption, parse_mode="HTML",
+                                               **common)
+        return await bot.send_video(
+            video=FSInputFile(it.path), caption=caption, parse_mode="HTML", supports_streaming=True,
+            width=it.width, height=it.height, duration=it.duration, **common,
+        )
+    media = []
+    for i, it in enumerate(items):
+        extra = dict(caption=caption, parse_mode="HTML") if i == 0 else {}
+        if it.is_image:
+            media.append(InputMediaPhoto(media=FSInputFile(it.path), **extra))
+        else:
+            media.append(InputMediaVideo(media=FSInputFile(it.path), width=it.width, height=it.height,
+                                         duration=it.duration, supports_streaming=True, **extra))
+    sent = await bot.send_media_group(media=media, **common)
+    return sent[0]
+
+
+async def download_links(bot: Bot, app: App, message: Message, links: list[Link]) -> None:
+    for link in links:
+        await _react(bot, message, "👀")
+        try:
+            async with app.dl_sem:
+                async with ChatActionSender.upload_video(bot=bot, chat_id=message.chat.id,
+                                                         message_thread_id=thread_id(message)):
+                    dl = await download(link, app.cookies_path)
+                    try:
+                        sent = await _send_download(bot, message, dl)
+                    finally:
+                        dl.cleanup()
+        except DownloadError as exc:
+            log.info("download %s failed (%s): %s", link.url, exc.reason, exc.detail)
+            if exc.reason == "no_media":
+                await _react(bot, message, None)
+                continue
+            await _react(bot, message, "🤷")
+            if exc.reason == "too_big":
+                await send_reply(bot, message, "📥 Видео больше 50 МБ — Telegram не даёт ботам отправлять такие файлы.")
+                continue
+            hint = DL_HINTS.get(exc.reason, DL_HINTS["failed"]).format(service=link.service)
+            await app.notify_owner(
+                bot, f"📥 {esc(hint)}\n<code>{esc(exc.detail[:300])}</code>",
+                throttle_key=f"dl:{link.service}:{exc.reason}",
+            )
+        except TelegramAPIError as exc:
+            log.warning("sending download from %s failed: %s", link.url, exc)
+            await _react(bot, message, "🤷")
+        else:
+            await _react(bot, message, None)
+            title = f": {dl.title}" if dl.title else ""
+            app.db.add_message(message.chat.id, sent.message_id, app.me.id, "Бот", "video",
+                               f"(скачано из {link.service}{title})", int(sent.date.timestamp()))
+
+
+def _without_links(message: Message) -> str:
+    text = message.text or message.caption or ""
+    for e in message.entities or message.caption_entities or []:
+        if e.type == "url":
+            text = text.replace(e.extract_from(message.text or message.caption or ""), "")
+    return text.strip()
+
+
 # ---------------------------------------------------------------- dispatch
 async def handle(bot: Bot, app: App, message: Message, *, place: str, private: bool,
-                 transcribe: bool, answer_on: bool) -> None:
+                 transcribe: bool, answer_on: bool, download_on: bool) -> None:
     chat_id = message.chat.id
     kind = kind_of(message)
     text = message.text or message.caption or ""
@@ -374,6 +500,12 @@ async def handle(bot: Bot, app: App, message: Message, *, place: str, private: b
         await send_reply(bot, message, "🎙 Я расшифровываю только голосовые и кружки. Музыку, аудио- и видеофайлы не обрабатываю.")
         return
     app.db.add_message(chat_id, message.message_id, sender.id if sender else None, author_of(message), kind, text, date)
+
+    links = find_links(message) if download_on and not from_bot else []
+    if links:
+        await download_links(bot, app, message, links)
+        if private and not _without_links(message):
+            return  # a bare link in private: just download it
 
     if from_bot or not answer_on or kind == "sticker":
         return
@@ -406,11 +538,12 @@ async def on_group_message(message: Message, bot: Bot, app: App) -> None:
     if not row.enabled:
         return
     await handle(bot, app, message, place=f"групповой чат «{row.title}»", private=False,
-                 transcribe=row.transcribe, answer_on=row.answer)
+                 transcribe=row.transcribe, answer_on=row.answer, download_on=row.download)
 
 
 @router.message(F.chat.type == "private")
 async def on_private_message(message: Message, bot: Bot, app: App) -> None:
     if not app.is_owner(message.from_user):
         return
-    await handle(bot, app, message, place="личный чат с владельцем", private=True, transcribe=True, answer_on=True)
+    await handle(bot, app, message, place="личный чат с владельцем", private=True, transcribe=True, answer_on=True,
+                 download_on=True)

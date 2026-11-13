@@ -7,7 +7,9 @@ import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import GetChat, GetChatMember, GetFile, SendMessage, EditMessageText
+from aiogram.methods import (
+    EditMessageText, GetChat, GetChatMember, GetFile, SendDocument, SendMessage, SendPhoto, SendVideo,
+)
 from aiogram.types import (
     Audio, Document, Video, VideoNote,
     CallbackQuery, Chat, ChatMemberAdministrator, ChatMemberLeft, ChatMemberMember, ChatMemberUpdated,
@@ -19,7 +21,8 @@ from bot.admin import Panel
 from bot.app import App
 from bot.config import Config
 from bot.db import Database
-from bot.apis import ChatResult, Transcript
+from bot.apis import ChatResult, Source, Transcript
+from bot.downloader import Download, Item
 
 NOW = dt.datetime(2026, 11, 13, 12, 0, tzinfo=dt.timezone.utc)
 ME = User(id=999, is_bot=True, first_name="ItBot", username="it_test_bot", can_read_all_group_messages=False)
@@ -40,11 +43,11 @@ class FakeSession(BaseSession):
 
     async def make_request(self, bot, method, timeout=None):
         self.calls.append(method)
-        if isinstance(method, (SendMessage, EditMessageText)):
+        if isinstance(method, (SendMessage, EditMessageText, SendVideo, SendPhoto, SendDocument)):
             self.n += 1
             chat_id = method.chat_id
             return Message(message_id=self.n, date=NOW, chat=Chat(id=chat_id, type="private" if chat_id > 0 else "supergroup"),
-                           from_user=ME, text=method.text)
+                           from_user=ME, text=getattr(method, "text", None))
         if isinstance(method, GetFile):
             return File(file_id=method.file_id, file_unique_id="u", file_path="voice/file.ogg", file_size=10)
         if isinstance(method, GetChatMember):
@@ -71,9 +74,14 @@ class FakeXAI:
         self.transcribed.append((audio, filename, mime))
         return Transcript(text="Встречаемся завтра в 10 утра у офиса", language="ru")
 
-    async def chat(self, model, messages):
-        self.chats.append((model, messages))
-        return ChatResult(text="**Завтра в 10:00** у офиса.", input_tokens=50, output_tokens=10)
+    async def respond(self, model, items, search=True, max_turns=5):
+        self.chats.append((model, items))
+        return self.next_result
+
+    next_result = ChatResult(text="**Завтра в 10:00** у офиса.", input_tokens=50, output_tokens=10)
+
+    async def chat(self, model, messages):  # fallback path, unused when respond works
+        raise AssertionError("chat completions fallback should not be used")
 
     async def list_chat_models(self):
         return ["grok-4.7", "grok-4.3"]
@@ -95,7 +103,10 @@ def env(tmp_path: Path):
     app = App(cfg=cfg, db=db, xai=xai, stt=xai, me=ME, sem=asyncio.Semaphore(2))
     dp = Dispatcher()
     dp["app"] = app
-    dp.include_routers(admin.router, members.router, chat.router)
+    routers = (admin.router, members.router, chat.router)
+    for r in routers:  # module-level routers: detach from a previous test's dispatcher
+        r._parent_router = None
+    dp.include_routers(*routers)
     return bot, dp, app, session, xai
 
 
@@ -265,3 +276,70 @@ def test_create_bot_like_production():
         await b.session.close()
 
     run_ = asyncio.run(run())
+
+
+def test_reply_mention_search_and_link_download(env, monkeypatch, tmp_path):
+    bot, dp, app, session, xai = env
+    from aiogram.methods import SendVideo, SetMessageReaction
+
+    downloaded = []
+
+    async def fake_download(link, cookies=None):
+        downloaded.append(link)
+        f = tmp_path / "reel.mp4"
+        f.write_bytes(b"mp4")
+        return Download(link=link, title="Funny reel", uploader="someone",
+                        items=[Item(path=f, is_image=False, width=720, height=1280, duration=5)])
+
+    monkeypatch.setattr(chat, "download", fake_download)
+
+    async def scenario():
+        app.db.set_setting("owner_id", str(OWNER.id))
+        await dp.feed_update(bot, added(GROUP, OWNER, admin_member()))
+
+        # 1. tag the bot in a reply to someone else's message -> bot reads that message
+        session.calls.clear()
+        original = Message(message_id=70, date=NOW, chat=GROUP, from_user=STRANGER,
+                           text="Кто знает, во сколько закрывается МФЦ на Тверской?")
+        await dp.feed_update(bot, upd(message=original))
+        tag = Message(message_id=71, date=NOW, chat=GROUP, from_user=OWNER, text="@it_test_bot",
+                      reply_to_message=original, entities=[MessageEntity(type="mention", offset=0, length=12)])
+        await dp.feed_update(bot, upd(message=tag))
+        user_text = xai.chats[-1][1][1]["content"]
+        assert "во сколько закрывается МФЦ" in user_text and "в ответ на сообщение от Stranger" in user_text
+        assert session.sent()[-1].reply_parameters.message_id == 71
+
+        # 2. "погугли" -> answer comes with sources line
+        xai.next_result = ChatResult(text="Главные новости США: ...", input_tokens=900, output_tokens=60,
+                                     sources=(Source("https://www.reuters.com/world/us/"), Source("https://apnews.com/x")),
+                                     searches=2)
+        session.calls.clear()
+        q = "@it_test_bot погугли новости в США"
+        await dp.feed_update(bot, upd(message=Message(message_id=72, date=NOW, chat=GROUP, from_user=OWNER, text=q,
+                                                      entities=[MessageEntity(type="mention", offset=0, length=12)])))
+        out = session.sent()[-1]
+        assert "Главные новости США" in out.text
+        assert '<a href="https://www.reuters.com/world/us/">reuters.com</a>' in out.text and "apnews.com" in out.text
+        assert "web_search" in xai.chats[-1][1][0]["content"]  # system prompt tells Grok it can search
+
+        # 3. a Reels link is downloaded and sent as a video reply; no LLM call for a bare link
+        session.calls.clear()
+        n_chat = len(xai.chats)
+        url = "https://www.instagram.com/reel/Chunk8-jurw/"
+        await dp.feed_update(bot, upd(message=Message(message_id=73, date=NOW, chat=GROUP, from_user=STRANGER, text=url,
+                                                      entities=[MessageEntity(type="url", offset=0, length=len(url))])))
+        assert [l.service for l in downloaded] == ["Instagram"]
+        videos = [c for c in session.calls if isinstance(c, SendVideo)]
+        assert len(videos) == 1 and videos[0].reply_parameters.message_id == 73 and videos[0].width == 720
+        assert "Instagram" in videos[0].caption and "someone" in videos[0].caption
+        reactions = [c.reaction for c in session.calls if isinstance(c, SetMessageReaction)]
+        assert reactions[0][0].emoji == "👀" and reactions[-1] == []
+        assert len(xai.chats) == n_chat
+
+        # 4. download toggle off -> link ignored
+        app.db.set_flag(GROUP.id, "download", False)
+        await dp.feed_update(bot, upd(message=Message(message_id=74, date=NOW, chat=GROUP, from_user=STRANGER, text=url,
+                                                      entities=[MessageEntity(type="url", offset=0, length=len(url))])))
+        assert len(downloaded) == 1
+
+    run(scenario())

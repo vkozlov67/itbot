@@ -22,6 +22,7 @@ from .app import App
 from .db import ChatRow
 from .textutil import esc, fmt_duration, fmt_tokens
 from .apis import APIError
+from .downloader import SERVICES, cookie_domains, looks_like_cookies
 
 log = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -76,6 +77,9 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         "",
         f"Ответы (Grok): <code>{esc(app.chat_model())}</code>",
         f"Расшифровка (OpenAI): <code>{esc(app.cfg.stt_model)}</code>",
+        "Cookies для скачивания: "
+        + (", ".join(esc(d) for d in cookie_domains(app.cookies_path)[:6]) or "нет"
+           if app.cookies_path.exists() else "нет"),
         "",
         f"Сегодня: 🎙 {today.stt_count} ({fmt_duration(today.stt_seconds)}) · "
         f"💬 {today.llm_requests} ({fmt_tokens(today.input_tokens + today.output_tokens)} ток.)",
@@ -89,7 +93,8 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         lines.append("Бот пока не добавлен ни в один чат. Нажмите «➕ Добавить в группу».")
     rows = [[btn(f"{'✅' if c.enabled else '⏸'} {c.title or c.chat_id}"[:60], a="chat", c=c.chat_id)] for c in chats]
     rows.append([InlineKeyboardButton(text="➕ Добавить в группу", url=app.add_to_group_link())])
-    rows.append([btn("🤖 Модель", a="models"), btn("🔄 Обновить", a="home")])
+    rows.append([btn("🤖 Модель", a="models"), btn("🍪 Cookies", a="cookies")])
+    rows.append([btn("🔄 Обновить", a="home")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -162,6 +167,8 @@ async def chat_view(bot: Bot, app: App, chat_id: int) -> tuple[str, InlineKeyboa
             btn(f"🎙 Расшифровка: {'вкл' if row.transcribe else 'выкл'}", a="tog", c=row.chat_id, v="transcribe"),
             btn(f"💬 Ответы: {'вкл' if row.answer else 'выкл'}", a="tog", c=row.chat_id, v="answer"),
         ],
+        [btn(f"📥 Скачивание по ссылкам: {'вкл' if row.download else 'выкл'}", a="tog", c=row.chat_id,
+             v="download")],
         [btn("🧹 Очистить память", a="clr", c=row.chat_id)],
         [btn("🚪 Выйти из чата", a="leave", c=row.chat_id)],
         [btn("« Назад", a="home")],
@@ -186,6 +193,31 @@ async def models_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
             continue
         rows.append([InlineKeyboardButton(text=("✅ " if m == current else "") + m, callback_data=cb)])
     lines.append("Выберите модель:")
+    rows.append([btn("« Назад", a="home")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cookies_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
+    services = ", ".join(name for name, _ in SERVICES)
+    domains = cookie_domains(app.cookies_path) if app.cookies_path.exists() else []
+    lines = [
+        "<b>🍪 Cookies для скачивания видео</b>",
+        "",
+        f"Бот скачивает видео по ссылкам: {services}.",
+        "Instagram, X, VK, Facebook и Pinterest работают без входа. YouTube, TikTok и Reddit с сервера "
+        "отдают видео только залогиненным — для них нужны cookies.",
+        "",
+        "<b>Как добавить:</b>",
+        "1. Войдите на нужные сайты в браузере на компьютере (лучше с запасного аккаунта).",
+        "2. Поставьте расширение «Get cookies.txt LOCALLY» (Chrome/Firefox) и экспортируйте cookies "
+        "в формате Netscape.",
+        "3. Пришлите файл <code>cookies.txt</code> сюда, в личку боту. Можно один файл с cookies нескольких сайтов.",
+        "",
+        "Сейчас: " + (", ".join(esc(d) for d in domains[:15]) if domains else "cookies не загружены"),
+    ]
+    rows = []
+    if app.cookies_path.exists():
+        rows.append([btn("🗑 Удалить cookies", a="ckdel")])
     rows.append([btn("« Назад", a="home")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -253,6 +285,37 @@ async def on_reset(message: Message, app: App) -> None:
     await message.answer("🧹 Память личного диалога очищена.")
 
 
+@router.message(
+    F.chat.type == "private",
+    lambda m: bool(m.document and (m.document.file_name or "").lower().endswith(".txt")),
+)
+async def on_cookies_file(message: Message, bot: Bot, app: App) -> None:
+    if not app.is_owner(message.from_user):
+        return
+    doc = message.document
+    assert doc is not None
+    if (doc.file_size or 0) > 2 * 1024 * 1024:
+        await message.answer("Файл слишком большой для cookies.txt.")
+        return
+    buf = await bot.download(doc.file_id)
+    assert buf is not None
+    data = buf.getvalue()
+    if not looks_like_cookies(data):
+        await message.answer("Это не похоже на cookies.txt в формате Netscape. См. /panel → 🍪 Cookies.")
+        return
+    tmp = app.cookies_path.with_suffix(".tmp")
+    tmp.write_bytes(data)
+    tmp.chmod(0o600)
+    tmp.replace(app.cookies_path)
+    domains = cookie_domains(app.cookies_path)
+    log.info("cookies updated: %d domains", len(domains))
+    await message.answer(
+        "🍪 Cookies сохранены. Сайты: " + (", ".join(esc(d) for d in domains[:20]) or "—")
+        + "\n\nСообщение с файлом лучше удалить из чата.",
+        parse_mode="HTML",
+    )
+
+
 # ---------------------------------------------------------------- callbacks
 @router.callback_query(Panel.filter())
 async def on_panel_cb(cb: CallbackQuery, callback_data: Panel, bot: Bot, app: App) -> None:
@@ -272,6 +335,17 @@ async def on_panel_cb(cb: CallbackQuery, callback_data: Panel, bot: Bot, app: Ap
     if a == "models":
         await cb.answer("Загружаю список…")
         await _show(cb, *(await models_view(app)))
+        return
+
+    if a == "cookies":
+        await cb.answer()
+        await _show(cb, *cookies_view(app))
+        return
+
+    if a == "ckdel":
+        app.cookies_path.unlink(missing_ok=True)
+        await cb.answer("Cookies удалены")
+        await _show(cb, *cookies_view(app))
         return
 
     if a == "setm":
@@ -298,12 +372,12 @@ async def on_panel_cb(cb: CallbackQuery, callback_data: Panel, bot: Bot, app: Ap
 
     if a == "tog":
         flag = callback_data.v
-        if flag not in ("enabled", "transcribe", "answer"):
+        if flag not in ("enabled", "transcribe", "answer", "download"):
             await cb.answer()
             return
         new_value = not getattr(row, flag)
         app.db.set_flag(chat_id, flag, new_value)
-        label = {"enabled": "Бот", "transcribe": "Расшифровка", "answer": "Ответы"}[flag]
+        label = {"enabled": "Бот", "transcribe": "Расшифровка", "answer": "Ответы", "download": "Скачивание"}[flag]
         await cb.answer(f"{label}: {'включено' if new_value else 'выключено'}")
         if flag == "enabled" and new_value:
             await announce(bot, app, chat_id)
@@ -353,6 +427,8 @@ async def announce(bot: Bot, app: App, chat_id: int) -> None:
     parts = []
     if row.transcribe:
         parts.append("🎙 расшифровываю голосовые и кружки")
+    if row.download:
+        parts.append("📥 скачиваю видео по ссылкам (Instagram Reels, X, VK, Facebook, Pinterest…)")
     if row.answer:
         parts.append(f"💬 отвечаю на вопросы — упомяните @{esc(app.me.username or '')}, ответьте на моё сообщение или напишите /ask")
     if not parts:
