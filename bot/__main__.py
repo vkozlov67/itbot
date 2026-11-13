@@ -6,7 +6,6 @@ import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import LinkPreviewOptions
 
 from . import admin, chat, members
 from .app import App
@@ -15,6 +14,10 @@ from .db import Database
 from .apis import OpenAITranscriber, XAIClient
 
 log = logging.getLogger("itbot")
+
+
+def create_bot(token: str) -> Bot:
+    return Bot(token, default=DefaultBotProperties(link_preview_is_disabled=True))
 
 
 async def main() -> None:
@@ -30,7 +33,7 @@ async def main() -> None:
     db = Database(cfg.data_dir / "itbot.sqlite3")
     xai = XAIClient(cfg.xai_api_key, cfg.xai_base_url)
     stt = OpenAITranscriber(cfg.openai_api_key, cfg.openai_base_url, cfg.stt_model)
-    bot = Bot(cfg.bot_token, default=DefaultBotProperties(link_preview_options=LinkPreviewOptions(is_disabled=True)))
+    bot = create_bot(cfg.bot_token)
     try:
         me = await bot.get_me()
         app = App(cfg=cfg, db=db, xai=xai, stt=stt, me=me, sem=asyncio.Semaphore(cfg.max_parallel_requests))

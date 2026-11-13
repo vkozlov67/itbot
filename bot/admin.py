@@ -217,7 +217,13 @@ async def on_start(message: Message, command: CommandObject, bot: Bot, app: App)
             await message.answer("Код недействителен.")
             return
     if not app.is_owner(user):
-        await message.answer(PRIVATE_BOT_TEXT)
+        if app.owner_id is None:
+            await message.answer(
+                "👑 Владелец ещё не назначен. Откройте ссылку, которую показала команда itbot-setup "
+                "на сервере (вида t.me/…?start=claim_…), и нажмите Start."
+            )
+        else:
+            await message.answer(PRIVATE_BOT_TEXT)
         return
     text, markup = await home_view(app)
     await message.answer(

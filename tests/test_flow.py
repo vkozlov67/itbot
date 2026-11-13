@@ -254,3 +254,14 @@ def test_full_flow(env):
         assert not g.enabled and not g.active
 
     run(scenario())
+
+
+def test_create_bot_like_production():
+    from bot.__main__ import create_bot
+
+    async def run():
+        b = create_bot("42:TEST")
+        assert b.default.link_preview_is_disabled is True
+        await b.session.close()
+
+    run_ = asyncio.run(run())
