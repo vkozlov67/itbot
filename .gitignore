@@ -1,0 +1,16 @@
+# secrets & runtime data
+.env
+.env.*
+data/
+*.sqlite3*
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+requirements.lock
+
+# os
+.DS_Store

@@ -1,0 +1,31 @@
+[Unit]
+Description=itbot — Telegram voice transcription (OpenAI) + Grok assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=itbot
+Group=itbot
+WorkingDirectory=/opt/itbot
+EnvironmentFile=/opt/itbot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/itbot/venv/bin/python -m bot
+Restart=always
+RestartSec=5
+MemoryMax=512M
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/opt/itbot/data
+
+[Install]
+WantedBy=multi-user.target
