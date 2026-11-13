@@ -123,12 +123,49 @@ def _collect(info: dict[str, Any]) -> list[dict[str, Any]]:
     return [e for e in entries if e]
 
 
+_photo_ie_cls: Any = None
+
+
+def _instagram_with_photos() -> Any:
+    """yt-dlp's Instagram extractor drops photos (it only keeps video formats). This subclass keeps them:
+    a photo (or a photo slide of a carousel) gets a single 'image' format with the largest picture."""
+    global _photo_ie_cls
+    if _photo_ie_cls is not None:
+        return _photo_ie_cls
+    from yt_dlp.extractor.instagram import InstagramIE as _Base
+    from yt_dlp.utils import traverse_obj, url_or_none
+
+    class InstagramIE(_Base):  # same name -> same ie_key "Instagram", replaces the stock extractor
+        def _extract_product_media(self, product_media):
+            info = super()._extract_product_media(product_media)
+            if info.get("formats"):
+                return info
+            candidates = traverse_obj(product_media, (
+                "image_versions2", "candidates", lambda _, v: url_or_none(v["url"]))) or []
+            if not candidates:
+                return info
+            best = max(candidates, key=lambda c: (c.get("width") or 0) * (c.get("height") or 0))
+            path = best["url"].split("?", 1)[0].lower()
+            ext = "webp" if path.endswith(".webp") else "png" if path.endswith(".png") else "jpg"
+            info["formats"] = [{
+                "url": best["url"], "format_id": "image", "ext": ext,
+                "width": best.get("width"), "height": best.get("height"),
+                "vcodec": "none", "acodec": "none",
+            }]
+            info["duration"] = None
+            return info
+
+    _photo_ie_cls = InstagramIE
+    return _photo_ie_cls
+
+
 def _run_ytdlp(url: str, outdir: Path, cookies: Path | None, height: int) -> dict[str, Any]:
     import yt_dlp  # imported lazily: heavy module, only needed when a link shows up
 
     opts: dict[str, Any] = {
         "outtmpl": str(outdir / "%(autonumber)02d-%(id).40s.%(ext)s"),
-        "format": "bv*+ba/b",
+        # video+audio, else a muxed file, else a photo (format_id "image" from the Instagram subclass)
+        "format": "bv*+ba/b/image",
         "format_sort": [f"res:{height}", "vcodec:h264", "acodec:aac", "ext:mp4:m4a"],
         "merge_output_format": "mp4",
         "max_filesize": TG_UPLOAD_LIMIT,
@@ -146,6 +183,7 @@ def _run_ytdlp(url: str, outdir: Path, cookies: Path | None, height: int) -> dic
     if cookies and cookies.exists():
         opts["cookiefile"] = str(cookies)
     with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.add_info_extractor(_instagram_with_photos()())
         info = ydl.extract_info(url, download=True)
         return ydl.sanitize_info(info) if info else {}
 

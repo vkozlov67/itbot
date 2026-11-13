@@ -310,3 +310,20 @@ def test_cookies_helpers(tmp_path):
     p = tmp_path / "cookies.txt"
     p.write_bytes(data)
     assert cookie_domains(p) == ["instagram.com", "tiktok.com"]
+
+
+def test_instagram_photo_extractor_keeps_photos():
+    from bot.downloader import _instagram_with_photos
+
+    ie = _instagram_with_photos()()
+    photo = {"pk": "3486035930417337302", "image_versions2": {"candidates": [
+        {"url": "https://cdn.example/small.jpg?x=1", "width": 320, "height": 320},
+        {"url": "https://cdn.example/big.jpg?x=1", "width": 1080, "height": 1350},
+    ]}}
+    info = ie._extract_product_media(photo)
+    assert [f["format_id"] for f in info["formats"]] == ["image"]
+    assert info["formats"][0]["url"] == "https://cdn.example/big.jpg?x=1" and info["formats"][0]["ext"] == "jpg"
+    assert ie.ie_key() == "Instagram"
+    video = {"pk": "1", "video_versions": [{"url": "https://cdn.example/v.mp4", "width": 720, "height": 1280, "type": 101}]}
+    vformats = ie._extract_product_media(video)["formats"]
+    assert vformats and all(f.get("format_id") != "image" for f in vformats)
