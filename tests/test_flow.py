@@ -287,8 +287,27 @@ def test_create_bot_like_production():
     from bot.__main__ import create_bot
 
     async def run():
+        import socket
+        from aiogram.client.session.aiohttp import AiohttpSession
+        from aiogram.methods import GetUpdates, SendMessage
         b = create_bot("42:TEST")
         assert b.default.link_preview_is_disabled is True
+        assert b.session._connector_init["family"] == socket.AF_INET
+        seen = {}
+
+        async def fake(self, bot, method, timeout=None):
+            seen[type(method).__name__] = timeout
+            return []
+
+        orig = AiohttpSession.make_request
+        AiohttpSession.make_request = fake
+        try:
+            # aiogram asks for session.timeout + polling_timeout (70 s); a long poll is capped at 20 s
+            await b.session.make_request(b, GetUpdates(timeout=10), timeout=70)
+            await b.session.make_request(b, SendMessage(chat_id=1, text="x"), timeout=None)
+        finally:
+            AiohttpSession.make_request = orig
+        assert seen == {"GetUpdates": 20, "SendMessage": None}
         await b.session.close()
 
     run_ = asyncio.run(run())

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.methods import GetUpdates
 
 from . import admin, chat, members, summary
 from .app import App
@@ -16,8 +19,28 @@ from .apis import OpenAITranscriber, XAIClient
 log = logging.getLogger("itbot")
 
 
+POLL_GRACE = 10  # seconds a long poll may run past its own timeout before we give up on the connection
+
+
+class TelegramSession(AiohttpSession):
+    """IPv4 only, and a hung long poll is dropped after ~20 s instead of the default ~70 s.
+
+    On this host a pooled connection to Telegram sometimes stalls silently; with aiogram's defaults
+    the bot then receives nothing for over a minute and gets all messages in one late batch.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._connector_init["family"] = socket.AF_INET
+
+    async def make_request(self, bot, method, timeout=None):
+        if isinstance(method, GetUpdates):
+            timeout = (method.timeout or 0) + POLL_GRACE
+        return await super().make_request(bot, method, timeout)
+
+
 def create_bot(token: str) -> Bot:
-    return Bot(token, default=DefaultBotProperties(link_preview_is_disabled=True))
+    return Bot(token, session=TelegramSession(), default=DefaultBotProperties(link_preview_is_disabled=True))
 
 
 async def main() -> None:
