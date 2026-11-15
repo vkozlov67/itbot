@@ -37,7 +37,7 @@ class Panel(CallbackData, prefix="p"):
 
 
 FLAG_LABELS = {"enabled": "Бот", "transcribe": "Расшифровка", "answer": "Ответы", "download": "Скачивание",
-               "daily_summary": "Итоги дня"}
+               "daily_summary": "Итоги дня", "delete_links": "Удаление ссылок"}
 
 
 def btn(text: str, **kw) -> InlineKeyboardButton:
@@ -213,6 +213,7 @@ async def chat_view(bot: Bot, app: App, chat_id: int) -> tuple[str, InlineKeyboa
             flip(f"💬 Ответы: {'вкл' if row.answer else 'выкл'}", "answer"),
         ],
         [flip(f"📥 Скачивание по ссылкам: {'вкл' if row.download else 'выкл'}", "download")],
+        [flip(f"🗑 Удалять сообщение со ссылкой: {'да' if row.delete_links else 'нет'}", "delete_links")],
         [flip(f"🗞 Итоги дня в {app.cfg.summary_time}: {'вкл' if row.daily_summary else 'выкл'}", "daily_summary")],
         [btn("🧹 Очистить память", a="clr", c=row.chat_id)],
         [btn("🚪 Выйти из чата", a="leave", c=row.chat_id)],
@@ -251,6 +252,8 @@ def cookies_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         f"Бот скачивает видео по ссылкам: {services}.",
         "Instagram, Threads, X, VK, Facebook и Pinterest работают без входа. YouTube, TikTok и Reddit с сервера "
         "отдают видео только залогиненным — для них нужны cookies.",
+        "Ссылки-«поделиться» вида <code>threads.com/share/…</code> раскрываются только с cookies Threads "
+        "(прямые ссылки на пост <code>threads.com/@автор/post/…</code> работают и без них).",
         "",
         "<b>Как добавить:</b>",
         "1. Войдите на нужные сайты в браузере на компьютере (лучше с запасного аккаунта).",

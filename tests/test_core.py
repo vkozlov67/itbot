@@ -342,6 +342,11 @@ def test_threads_links_and_page_parsing():
     m = msg("https://www.threads.net/@zuck/post/DfNR0zhEdWv?x=1 и https://www.threads.com/@zuck",
             entities=[MessageEntity(type="url", offset=0, length=50)])
     assert [l.service for l in find_links(m)] == ["Threads"]
+    for url, service in [("https://www.threads.com/share/BAI6MGSd3d", "Threads"),
+                         ("https://www.instagram.com/share/reel/BAaBcD123/", "Instagram"),
+                         ("https://www.instagram.com/share/BAaBcD123", "Instagram")]:
+        assert [l.service for l in find_links(msg(url, entities=[MessageEntity(type="url", offset=0, length=len(url))]))] \
+            == [service], url
 
     post = {
         "code": "ABC", "caption": {"text": "Текст поста"}, "user": {"username": "neo"},

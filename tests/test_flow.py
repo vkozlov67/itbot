@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (
-    AnswerCallbackQuery, EditMessageText, GetChat, GetChatMember, GetFile, SendDocument, SendMessage, SendPhoto, SendVideo,
+    AnswerCallbackQuery, DeleteMessage, EditMessageText, GetChat, GetChatMember, GetFile, SendDocument, SendMessage, SendPhoto, SendVideo,
 )
 from aiogram.types import (
     Audio, Document, Video, VideoNote,
@@ -22,7 +22,7 @@ from bot.app import App
 from bot.config import Config
 from bot.db import Database
 from bot.apis import ChatResult, Source, Transcript
-from bot.downloader import Download, Item
+from bot.downloader import Download, DownloadError, Item
 
 NOW = dt.datetime(2026, 11, 13, 12, 0, tzinfo=dt.timezone.utc)
 ME = User(id=999, is_bot=True, first_name="ItBot", username="it_test_bot", can_read_all_group_messages=False)
@@ -38,6 +38,7 @@ class FakeSession(BaseSession):
         self.calls = []
         self.n = 1000
         self.fail_answer = False
+        self.member = None  # what GetChatMember returns (default: a plain member)
 
     async def close(self):
         pass
@@ -54,6 +55,8 @@ class FakeSession(BaseSession):
         if isinstance(method, GetFile):
             return File(file_id=method.file_id, file_unique_id="u", file_path="voice/file.ogg", file_size=10)
         if isinstance(method, GetChatMember):
+            if self.member is not None:
+                return self.member
             return ChatMemberMember(user=User(id=method.user_id, is_bot=False, first_name="x"))
         if isinstance(method, GetChat):
             raise TelegramBadRequest(method=method, message="test: no get_chat")
@@ -319,8 +322,13 @@ def test_reply_mention_search_and_link_download(env, monkeypatch, tmp_path):
 
     downloaded = []
 
+    fail_next = []
+
     async def fake_download(link, cookies=None):
         downloaded.append(link)
+        if fail_next:
+            fail_next.pop()
+            raise DownloadError("failed", "boom")
         f = tmp_path / "reel.mp4"
         f.write_bytes(b"mp4")
         return Download(link=link, title="Funny reel", uploader="someone",
@@ -380,11 +388,44 @@ def test_reply_mention_search_and_link_download(env, monkeypatch, tmp_path):
         assert reactions[0][0].emoji == "👀" and reactions[-1] == []
         assert len(xai.chats) == n_chat
 
+        # 3b. no delete right (above): the original stays and the owner is told once
+        assert any("Удаление сообщений" in m.text for m in session.sent() if m.chat_id == OWNER.id)
+        assert not [c for c in session.calls if isinstance(c, DeleteMessage)]
+
+        # 3c. with the delete right: media replaces the link message, says who shared it + their comment,
+        #     keeps the reply chain, and the original is deleted
+        session.member = admin_member()
+        session.calls.clear()
+        text = f"{url} смотри"
+        root = Message(message_id=60, date=NOW, chat=GROUP, from_user=OWNER, text="старое")
+        await dp.feed_update(bot, upd(message=Message(
+            message_id=75, date=NOW, chat=GROUP, from_user=STRANGER, text=text, reply_to_message=root,
+            entities=[MessageEntity(type="url", offset=0, length=len(url))])))
+        videos = [c for c in session.calls if isinstance(c, SendVideo)]
+        assert len(videos) == 1 and videos[0].reply_parameters.message_id == 60
+        assert f"от <b>{STRANGER.full_name}</b>: смотри" in videos[0].caption
+        deletes = [c for c in session.calls if isinstance(c, DeleteMessage)]
+        assert [(d.chat_id, d.message_id) for d in deletes] == [(GROUP.id, 75)]
+
+        # 3d. a failed download keeps the original; a question to the bot with a link is never deleted
+        session.calls.clear()
+        fail_next.append(True)
+        await dp.feed_update(bot, upd(message=Message(message_id=76, date=NOW, chat=GROUP, from_user=STRANGER, text=url,
+                                                      entities=[MessageEntity(type="url", offset=0, length=len(url))])))
+        q = f"@it_test_bot что тут {url}"
+        await dp.feed_update(bot, upd(message=Message(
+            message_id=77, date=NOW, chat=GROUP, from_user=STRANGER, text=q,
+            entities=[MessageEntity(type="mention", offset=0, length=12),
+                      MessageEntity(type="url", offset=q.index("http"), length=len(url))])))
+        assert not [c for c in session.calls if isinstance(c, DeleteMessage)]
+        assert [c for c in session.calls if isinstance(c, SendVideo)][-1].reply_parameters.message_id == 77
+        session.member = None
+
         # 4. download toggle off -> link ignored
         app.db.set_flag(GROUP.id, "download", False)
         await dp.feed_update(bot, upd(message=Message(message_id=74, date=NOW, chat=GROUP, from_user=STRANGER, text=url,
                                                       entities=[MessageEntity(type="url", offset=0, length=len(url))])))
-        assert len(downloaded) == 1
+        assert len(downloaded) == 4
 
     run(scenario())
 

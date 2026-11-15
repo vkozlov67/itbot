@@ -24,7 +24,9 @@ IMAGE_EXTS = {"jpg", "jpeg", "png", "webp"}
 # (service name, URL pattern). Only links to a single post/video are matched, so profile
 # or feed links are ignored and the bot never spams errors for them.
 SERVICES: list[tuple[str, re.Pattern[str]]] = [
-    ("Instagram", re.compile(r"^https?://(?:www\.|m\.)?instagram\.com/(?:[\w.]+/)?(?:reels?|p|tv)/[\w-]+", re.I)),
+    ("Instagram", re.compile(
+        r"^https?://(?:www\.|m\.)?instagram\.com/(?:(?:[\w.]+/)?(?:reels?|p|tv)/[\w-]+|share/(?:(?:reels?|p)/)?[\w-]+)",
+        re.I)),
     ("TikTok", re.compile(
         r"^https?://(?:(?:www|m)\.tiktok\.com/(?:@[\w.-]+/(?:video|photo)/\d+|t/\w+)|(?:vm|vt)\.tiktok\.com/\w+)", re.I)),
     ("YouTube", re.compile(r"^https?://(?:www\.|m\.)?youtube\.com/shorts/[\w-]{11}", re.I)),
@@ -36,7 +38,7 @@ SERVICES: list[tuple[str, re.Pattern[str]]] = [
     ("Reddit", re.compile(r"^https?://(?:(?:www|old|new)\.reddit\.com/r/\w+/(?:comments|s)/\w+|v\.redd\.it/\w+)", re.I)),
     ("Pinterest", re.compile(r"^https?://(?:(?:\w+\.)?pinterest\.[a-z.]+/pin/[\w-]+|pin\.it/\w+)", re.I)),
     ("Twitch", re.compile(r"^https?://(?:clips\.twitch\.tv/[\w-]+|(?:www\.)?twitch\.tv/\w+/clip/[\w-]+)", re.I)),
-    ("Threads", re.compile(r"^https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/post/[\w-]+", re.I)),
+    ("Threads", re.compile(r"^https?://(?:www\.)?threads\.(?:net|com)/(?:@[\w.]+/post/[\w-]+|share/[\w-]+)", re.I)),
 ]
 
 # Services whose post text (caption) is worth sending along with the media.
@@ -220,9 +222,64 @@ def _description(link: Link, info: dict[str, Any], entries: list[dict[str, Any]]
     return str(text or "").strip()[:MAX_DESCRIPTION]
 
 
+SHARE_RE = re.compile(r"^https?://(?:www\.|m\.)?(?:instagram|threads)\.(?:com|net)/share/", re.I)
+POST_URL_RE = {
+    "Instagram": re.compile(r"https?://(?:www\.)?instagram\.com/(?:[\w.]+/)?(?:reels?|p|tv)/[\w-]+", re.I),
+    "Threads": re.compile(r"https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/post/[\w-]+", re.I),
+}
+
+
+def _browser_session(cookies: Path | None) -> Any:
+    """A curl_cffi session that looks like Chrome; carries the owner's cookies.txt when uploaded."""
+    from curl_cffi import requests as cffi  # installed with yt-dlp[curl-cffi]
+
+    session = cffi.Session(impersonate="chrome")
+    if cookies and cookies.exists():
+        from http.cookiejar import LoadError, MozillaCookieJar
+
+        jar = MozillaCookieJar()
+        try:
+            jar.load(str(cookies), ignore_discard=True, ignore_expires=True)
+        except (LoadError, OSError) as exc:
+            log.warning("cookies.txt not loaded: %s", exc)
+        for c in jar:
+            if c.value is not None and any(d in c.domain for d in ("instagram.com", "threads.com", "threads.net")):
+                session.cookies.set(c.name, c.value, domain=c.domain)
+    return session
+
+
+def _resolve_share(link: Link, cookies: Path | None) -> Link:
+    """instagram.com/share/… and threads.com/share/… → the post URL they point to."""
+    session = _browser_session(cookies)
+    try:
+        r = session.get(link.url, timeout=30, allow_redirects=True)
+        pattern = POST_URL_RE[link.service]
+        m = pattern.match(str(r.url))
+        if not m:
+            # some share pages resolve on the client; then only trust the page's own canonical URL
+            # (other post links on the page may be recommendations, not the shared post)
+            meta = re.search(r'<(?:link rel="canonical" href|meta property="og:url" content)="([^"]+)"', r.text)
+            m = pattern.match(meta.group(1)) if meta else None
+    finally:
+        session.close()
+    if not m:
+        raise DownloadError("auth", f"{link.service} share-ссылка не раскрывается без входа в аккаунт")
+    return Link(url=m.group(0), service=link.service)
+
+
 async def download(link: Link, cookies: Path | None = None) -> Download:
+    if SHARE_RE.match(link.url):
+        try:
+            resolved = await asyncio.wait_for(asyncio.to_thread(_resolve_share, link, cookies), 60)
+        except DownloadError:
+            raise
+        except Exception as exc:  # network errors, timeouts
+            raise DownloadError("failed", f"share link: {str(exc)[:200]}") from exc
+        dl = await download(resolved, cookies)
+        dl.link = link
+        return dl
     if link.service == "Threads":
-        return await _download_threads(link)
+        return await _download_threads(link, cookies)
     tmpdir = Path(tempfile.mkdtemp(prefix="itbot-dl-"))
     try:
         last_error = DownloadError("failed", "ничего не скачалось")
@@ -320,14 +377,12 @@ def _threads_media(post: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _threads_fetch(link: Link, outdir: Path) -> tuple[str, str, list[Item]]:
-    from curl_cffi import requests as cffi  # installed with yt-dlp[curl-cffi]; looks like a real browser
-
+def _threads_fetch(link: Link, outdir: Path, cookies: Path | None = None) -> tuple[str, str, list[Item]]:
     m = THREADS_CODE_RE.search(link.url)
     if not m:
         raise DownloadError("no_media", "not a Threads post link")
     user, code = m.groups()
-    session = cffi.Session(impersonate="chrome")
+    session = _browser_session(cookies)
     try:
         r = session.get(f"https://www.threads.com/@{user}/post/{code}", timeout=30)
         if r.status_code == 404:
@@ -371,12 +426,12 @@ def _threads_fetch(link: Link, outdir: Path) -> tuple[str, str, list[Item]]:
         session.close()
 
 
-async def _download_threads(link: Link) -> Download:
+async def _download_threads(link: Link, cookies: Path | None = None) -> Download:
     tmpdir = Path(tempfile.mkdtemp(prefix="itbot-dl-"))
     try:
         try:
             caption, author, items = await asyncio.wait_for(
-                asyncio.to_thread(_threads_fetch, link, tmpdir), DOWNLOAD_TIMEOUT)
+                asyncio.to_thread(_threads_fetch, link, tmpdir, cookies), DOWNLOAD_TIMEOUT)
         except asyncio.TimeoutError as exc:
             raise DownloadError("failed", "скачивание заняло слишком много времени") from exc
         except DownloadError:

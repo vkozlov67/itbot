@@ -389,14 +389,21 @@ def _u16(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def _download_caption(dl: Download) -> tuple[str, str]:
+def _download_caption(dl: Download, shared_by: str = "", comment: str = "") -> tuple[str, str]:
     """(caption html, overflow text). The post text goes into a collapsible quote; if it doesn't fit
-    into the caption it is returned as overflow and sent as a separate reply."""
+    into the caption it is returned as overflow and sent as a separate reply.
+    shared_by/comment: who posted the link and what they wrote with it (the original message is deleted)."""
     head_html = f'📥 <a href="{html.escape(dl.link.url, quote=True)}">{dl.link.service}</a>'
     head_plain = f"📥 {dl.link.service}"
     if dl.uploader and dl.uploader.lower() != dl.link.service.lower():
         head_html += f" · {esc(dl.uploader)}"
         head_plain += f" · {dl.uploader}"
+    if shared_by:
+        head_html += f"\n👤 от <b>{esc(shared_by)}</b>"
+        head_plain += f"\n👤 от {shared_by}"
+        if comment:
+            head_html += f": {esc(comment)}"
+            head_plain += f": {comment}"
     text = dl.description.strip()
     if not text:
         return head_html, ""
@@ -405,13 +412,26 @@ def _download_caption(dl: Download) -> tuple[str, str]:
     return head_html, text
 
 
-async def _send_download(bot: Bot, message: Message, dl: Download) -> Message:
-    caption, overflow = _download_caption(dl)
-    common: dict[str, Any] = dict(
-        chat_id=message.chat.id,
-        reply_parameters=ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True),
-        request_timeout=300,
-    )
+def _reply_target(message: Message) -> int | None:
+    """What the link message itself replied to (not the forum topic root), to keep the thread intact."""
+    r = message.reply_to_message
+    if r is None or (message.is_topic_message and r.message_id == message.message_thread_id):
+        return None
+    return r.message_id
+
+
+async def _send_download(bot: Bot, message: Message, dl: Download, *, replace: bool = False) -> Message:
+    """replace=True: the original link message will be deleted, so the media is posted on its own
+    (as a reply to whatever the original replied to) and says who shared it."""
+    if replace:
+        caption, overflow = _download_caption(dl, author_of(message), _without_links(message))
+        target = _reply_target(message)
+    else:
+        caption, overflow = _download_caption(dl)
+        target = message.message_id
+    common: dict[str, Any] = dict(chat_id=message.chat.id, request_timeout=300)
+    if target is not None:
+        common["reply_parameters"] = ReplyParameters(message_id=target, allow_sending_without_reply=True)
     if thread_id(message):
         common["message_thread_id"] = thread_id(message)
     try:
@@ -420,7 +440,8 @@ async def _send_download(bot: Bot, message: Message, dl: Download) -> Message:
         if "caption" not in str(exc).lower() or not dl.description:
             raise
         # caption rejected as too long: header only, post text goes into a separate reply
-        caption = _download_caption(Download(link=dl.link, title=dl.title, uploader=dl.uploader))[0]
+        caption = _download_caption(Download(link=dl.link, title=dl.title, uploader=dl.uploader),
+                                    *((author_of(message), _without_links(message)) if replace else ()))[0]
         overflow = dl.description
         sent = await _send_media(bot, dl, caption, common)
     if overflow:
@@ -455,7 +476,9 @@ async def _send_media(bot: Bot, dl: Download, caption: str, common: dict[str, An
     return sent[0]
 
 
-async def download_links(bot: Bot, app: App, message: Message, links: list[Link]) -> None:
+async def download_links(bot: Bot, app: App, message: Message, links: list[Link], *, replace: bool = False) -> int:
+    """Download and post every link; returns how many were posted."""
+    posted = 0
     for link in links:
         await _react(bot, message, "👀")
         try:
@@ -464,7 +487,7 @@ async def download_links(bot: Bot, app: App, message: Message, links: list[Link]
                                                          message_thread_id=thread_id(message)):
                     dl = await download(link, app.cookies_path)
                     try:
-                        sent = await _send_download(bot, message, dl)
+                        sent = await _send_download(bot, message, dl, replace=replace)
                     finally:
                         dl.cleanup()
         except DownloadError as exc:
@@ -485,11 +508,51 @@ async def download_links(bot: Bot, app: App, message: Message, links: list[Link]
             log.warning("sending download from %s failed: %s", link.url, exc)
             await _react(bot, message, "🤷")
         else:
+            posted += 1
             await _react(bot, message, None)
             what = f"(скачано из {link.service}" + (f", автор {dl.uploader}" if dl.uploader else "") + ")"
             body = dl.description or dl.title
             app.db.add_message(message.chat.id, sent.message_id, app.me.id, "Бот", "video",
                                f"{what}\n{body}" if body else what, int(sent.date.timestamp()))
+    return posted
+
+
+async def _can_delete(bot: Bot, app: App, chat_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id, app.me.id)
+    except TelegramAPIError:
+        return False
+    return bool(getattr(member, "can_delete_messages", False))
+
+
+def _replaceable(message: Message, app: App) -> bool:
+    """A plain message with a link (and maybe a short comment) that isn't a question to the bot."""
+    if kind_of(message) != "text" or addressed(message, app.me)[0]:
+        return False
+    return len(_without_links(message)) <= 300
+
+
+async def _replace_links(bot: Bot, app: App, message: Message, links: list[Link]) -> None:
+    """Post the downloads in place of the message and delete it (only if everything was posted)."""
+    if not await _can_delete(bot, app, message.chat.id):
+        await app.notify_owner(
+            bot,
+            f"🗑 В чате <b>{esc(message.chat.title or str(message.chat.id))}</b> у меня нет права «Удаление сообщений», "
+            "поэтому я не могу убирать сообщения со ссылками. Дайте это право или выключите «🗑 Удалять сообщение "
+            "со ссылкой» в /panel.",
+            throttle_key=f"nodelete:{message.chat.id}",
+        )
+        await download_links(bot, app, message, links)
+        return
+    posted = await download_links(bot, app, message, links, replace=True)
+    if posted != len(links):
+        return  # something failed: keep the original so the link isn't lost
+    try:
+        await bot.delete_message(message.chat.id, message.message_id)
+    except TelegramAPIError as exc:
+        log.warning("could not delete link message %s in %s: %s", message.message_id, message.chat.id, exc)
+        return
+    log.info("replaced link message %s in %s with %d download(s)", message.message_id, message.chat.id, len(links))
 
 
 def _without_links(message: Message) -> str:
@@ -502,7 +565,7 @@ def _without_links(message: Message) -> str:
 
 # ---------------------------------------------------------------- dispatch
 async def handle(bot: Bot, app: App, message: Message, *, place: str, private: bool,
-                 transcribe: bool, answer_on: bool, download_on: bool) -> None:
+                 transcribe: bool, answer_on: bool, download_on: bool, replace_links: bool = False) -> None:
     chat_id = message.chat.id
     kind = kind_of(message)
     text = message.text or message.caption or ""
@@ -535,6 +598,9 @@ async def handle(bot: Bot, app: App, message: Message, *, place: str, private: b
 
     links = find_links(message) if download_on and not from_bot else []
     if links:
+        if replace_links and not private and _replaceable(message, app):
+            await _replace_links(bot, app, message, links)
+            return
         await download_links(bot, app, message, links)
         if private and not _without_links(message):
             return  # a bare link in private: just download it
@@ -577,7 +643,8 @@ async def on_group_message(message: Message, bot: Bot, app: App) -> None:
     if not row.enabled:
         return
     await handle(bot, app, message, place=f"групповой чат «{row.title}»", private=False,
-                 transcribe=row.transcribe, answer_on=row.answer, download_on=row.download)
+                 transcribe=row.transcribe, answer_on=row.answer, download_on=row.download,
+                 replace_links=row.delete_links)
 
 
 @router.message(F.chat.type == "private")
