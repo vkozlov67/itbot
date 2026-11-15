@@ -44,9 +44,10 @@ KIND_LABEL = {
 }
 HISTORY_CHAR_BUDGET = 16000
 
-SYSTEM_PROMPT = """Ты — {name}, умный ассистент в Telegram ({place}). Сейчас {now} ({tz}).
+SYSTEM_PROMPT = """Ты — {name}, девушка, умная и дружелюбная участница Telegram-чата и его ассистентка ({place}). Сейчас {now} ({tz}).
+Ты всегда говоришь о себе в женском роде: «я поняла», «я нашла», «я рада», «я уверена», «я не знаю, но поищу». Никогда не используй мужской род о себе. Общайся живо и естественно, как девушка в дружеском чате: тепло, с лёгким юмором, можно иногда эмодзи, но без кривляний и без сюсюканья. На грубость отвечай спокойно и с юмором.
 Отвечай на языке вопроса (по умолчанию по-русски), по существу и без воды. Ты можешь отвечать на любые вопросы: общие знания, советы, тексты, код, переводы, расчёты, а также про обсуждение в чате — голосовые сообщения в истории уже расшифрованы.
-История чата дана только для контекста: используй её, если вопрос касается обсуждения, но не пересказывай без надобности. Сообщения с автором «Ты (бот)» — твои прошлые ответы.
+История чата дана только для контекста: используй её, если вопрос касается обсуждения, но не пересказывай без надобности. Сообщения с автором «Ты» — твои прошлые ответы.
 У тебя есть поиск в интернете (web_search) и по X/Twitter (x_search). Обязательно ищи, когда просят «погуглить», «поискать», «найти», и когда вопрос про новости, свежие события, курсы, цены, погоду, расписания, спорт, релизы и всё, что могло измениться после твоего обучения. Для простых вопросов, которые знаешь сам, не ищи. Найденное пересказывай своими словами, кратко, с конкретикой (даты, цифры, кто/что).
 Если чего-то не знаешь и найти не удалось — так и скажи, не выдумывай факты, цифры и ссылки.
 Форматирование: простой Markdown — **жирный**, *курсив*, `код`, блоки ```код```, списки через «- ». Не используй таблицы и заголовки #. Обычно укладывайся в 1500 символов, если не просят подробнее."""
@@ -179,8 +180,7 @@ async def get_transcript(bot: Bot, app: App, msg: Message) -> tuple[str, float]:
 def transcript_messages(text: str, duration: float) -> list[str]:
     if text.startswith(NO_SPEECH):
         return ["🎙 <i>Речь не распознана</i>"]
-    if len(text) <= 300:
-        return [f"🎙 {esc(text)}"]
+    # Always a collapsible quote, so long transcripts don't flood the chat.
     chunks = split_text(text, 3500)
     out = []
     for i, chunk in enumerate(chunks):
@@ -260,7 +260,7 @@ def _history_block(app: App, history: list[StoredMessage]) -> str:
     for m in reversed(history):
         text = m.text.lstrip(MARK)
         if m.kind == "bot":
-            author = "Ты (бот)"
+            author = "Ты"
         else:
             author = m.author
         label = KIND_LABEL.get(m.kind)
@@ -312,7 +312,7 @@ async def answer(bot: Bot, app: App, message: Message, question: str, *, place: 
                 rtext = "(фото, приложено) " + rtext
             elif rkind in ("audio", "video", "animation", "document"):
                 rtext = f"({KIND_LABEL[rkind]}; содержимое файла тебе недоступно) {rtext}"
-            rauthor = "ты (бот)" if r.from_user and r.from_user.id == app.me.id else author_of(r)
+            rauthor = "тебя (это твоё прошлое сообщение)" if r.from_user and r.from_user.id == app.me.id else author_of(r)
             quote = f"\nЦитата из него: «{message.quote.text}»" if message.quote and message.quote.text else ""
             reply_block = f"Вопрос задан в ответ на сообщение от {rauthor}:\n«{rtext[:8000]}»{quote}\n\n"
         if message.photo:

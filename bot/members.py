@@ -44,9 +44,9 @@ async def on_my_chat_member(event: ChatMemberUpdated, bot: Bot, app: App) -> Non
         app.db.set_flag(chat.id, "enabled", by_owner)
         text = f"➕ Меня добавили в чат <b>{title}</b>\nДобавил: {by}\n\n"
         if by_owner:
-            text += "✅ Вы добавили меня сами — в этом чате я <b>включён</b>."
+            text += "✅ Вы добавили меня сами — в этом чате я <b>включена</b>."
         else:
-            text += "⏸ В этом чате я <b>выключен</b>, пока вы не включите."
+            text += "⏸ В этом чате я <b>выключена</b>, пока вы меня не включите."
         if new != "administrator" and not app.me.can_read_all_group_messages:
             text += (
                 "\n\n⚠️ Я не администратор и не увижу голосовые и обычные сообщения. "

@@ -56,7 +56,8 @@ def test_split_text():
 
 
 def test_transcript_messages():
-    assert transcript_messages("привет", 3) == ["🎙 привет"]
+    assert transcript_messages("привет", 3) == ["🎙 <b>Расшифровка</b> · 3 с\n<blockquote expandable>привет</blockquote>"]
+    assert transcript_messages("a < b", 0) == ["🎙 <b>Расшифровка</b>\n<blockquote expandable>a &lt; b</blockquote>"]
     long = transcript_messages("слово " * 1000, 125)
     assert long[0].startswith("🎙 <b>Расшифровка</b> · 2:05 (1/")
     assert all("<blockquote expandable>" in p for p in long)

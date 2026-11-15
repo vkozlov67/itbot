@@ -172,7 +172,8 @@ def test_full_flow(env):
         await dp.feed_update(bot, upd(message=vmsg))
         assert xai.transcribed and xai.transcribed[0][1:] == ("voice.ogg", "audio/ogg")
         sent = session.sent()
-        assert len(sent) == 1 and sent[0].text.startswith("🎙 Встречаемся завтра")
+        assert len(sent) == 1 and sent[0].text == (
+            "🎙 <b>Расшифровка</b> · 4 с\n<blockquote expandable>Встречаемся завтра в 10 утра у офиса</blockquote>")
         assert sent[0].reply_parameters.message_id == 50
 
         # 4. question with mention -> answer uses the transcript from history, markdown rendered
@@ -320,7 +321,9 @@ def test_reply_mention_search_and_link_download(env, monkeypatch, tmp_path):
         out = session.sent()[-1]
         assert "Главные новости США" in out.text
         assert '<a href="https://www.reuters.com/world/us/">reuters.com</a>' in out.text and "apnews.com" in out.text
-        assert "web_search" in xai.chats[-1][1][0]["content"]  # system prompt tells Grok it can search
+        system = xai.chats[-1][1][0]["content"]
+        assert "web_search" in system  # system prompt tells Grok it can search
+        assert "женском роде" in system and "ItBot, девушка" in system
 
         # 3. a Reels link is downloaded and sent as a video reply; no LLM call for a bare link
         session.calls.clear()
