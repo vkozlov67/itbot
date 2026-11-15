@@ -51,6 +51,7 @@ async def setup_commands(bot: Bot, app: App) -> None:
             [
                 BotCommand(command="ask", description="Задать вопрос"),
                 BotCommand(command="summary", description="Итоги чата за сутки (/summary 6 — за 6 часов)"),
+                BotCommand(command="draw", description="Нарисовать картинку (Grok Imagine)"),
             ],
             scope=BotCommandScopeAllGroupChats(),
         )
@@ -60,6 +61,7 @@ async def setup_commands(bot: Bot, app: App) -> None:
                 [
                     BotCommand(command="panel", description="Панель управления"),
                     BotCommand(command="reset", description="Очистить память личного диалога"),
+                    BotCommand(command="draw", description="Нарисовать картинку"),
                 ],
                 scope=BotCommandScopeChat(chat_id=app.owner_id),
             )
@@ -85,6 +87,7 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         "",
         f"Ответы (Grok): <code>{esc(app.chat_model())}</code>",
         f"Расшифровка (OpenAI): <code>{esc(app.cfg.stt_model)}</code>",
+        f"Картинки (Grok Imagine): <code>{esc(app.cfg.image_model)}</code>",
         "Режим приватности бота: "
         + ("выключен ✅ (видит все сообщения в группах)" if app.me.can_read_all_group_messages
            else "включён — в группах, где бот не админ, он видит только /ask и ответы на свои сообщения"),
@@ -93,9 +96,9 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
            if app.cookies_path.exists() else "нет"),
         "",
         f"Сегодня: 🎙 {today.stt_count} ({fmt_duration(today.stt_seconds)}) · "
-        f"💬 {today.llm_requests} ({fmt_tokens(today.input_tokens + today.output_tokens)} ток.)",
+        f"💬 {today.llm_requests} ({fmt_tokens(today.input_tokens + today.output_tokens)} ток.) · 🎨 {today.images}",
         f"Всего: 🎙 {total.stt_count} ({fmt_duration(total.stt_seconds)}) · "
-        f"💬 {total.llm_requests} ({fmt_tokens(total.input_tokens + total.output_tokens)} ток.)",
+        f"💬 {total.llm_requests} ({fmt_tokens(total.input_tokens + total.output_tokens)} ток.) · 🎨 {total.images}",
         "",
     ]
     blind = [c for c in chats if c.enabled and not c.is_admin and not app.me.can_read_all_group_messages]
@@ -499,6 +502,7 @@ async def announce(bot: Bot, app: App, chat_id: int) -> None:
         parts.append("📥 скачиваю видео и фото по ссылкам вместе с текстом поста (Instagram, Threads, X, VK, Facebook, Pinterest…)")
     if row.answer:
         parts.append("🗞 /summary — итоги чата за сутки")
+        parts.append(f"🎨 рисую картинки — «@{esc(app.me.username or '')} нарисуй …», а в ответ на фото — «переделай в стиле …»")
     if row.answer:
         parts.append(f"💬 отвечаю на вопросы — упомяните @{esc(app.me.username or '')}, ответьте на моё сообщение или напишите /ask")
     if not parts:

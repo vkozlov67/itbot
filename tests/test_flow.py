@@ -95,6 +95,17 @@ class FakeXAI:
     async def list_chat_models(self):
         return ["grok-4.7", "grok-4.3"]
 
+    images = None
+    image_error = None
+
+    async def image(self, model, prompt, source=None, aspect_ratio=None):
+        if self.images is None:
+            self.images = []
+        self.images.append((model, prompt, source, aspect_ratio))
+        if self.image_error is not None:
+            raise self.image_error
+        return b"\xff\xd8fake-jpeg"
+
     async def close(self):
         pass
 
@@ -427,6 +438,67 @@ def test_reply_mention_search_and_link_download(env, monkeypatch, tmp_path):
                                                       entities=[MessageEntity(type="url", offset=0, length=len(url))])))
         assert len(downloaded) == 4
 
+    run(scenario())
+
+
+def test_draw_and_edit_pictures(env):
+    from aiogram.methods import SendPhoto
+    from aiogram.types import PhotoSize
+    from bot import draw as draw_mod
+    from bot.apis import APIError
+
+    bot, dp, app, session, xai = env
+
+    def mention(mid, text, user=STRANGER, **kw):
+        return upd(message=Message(message_id=mid, date=NOW, chat=GROUP, from_user=user, text=text,
+                                   entities=[MessageEntity(type="mention", offset=0, length=12)], **kw))
+
+    async def scenario():
+        app.db.set_setting("owner_id", str(OWNER.id))
+        await dp.feed_update(bot, added(GROUP, OWNER, admin_member()))
+        n_chat = len(xai.chats)
+
+        # 1. "@bot нарисуй …" -> picture as a reply, no chat-model call, counted in usage
+        session.calls.clear()
+        await dp.feed_update(bot, mention(90, "@it_test_bot нарисуй кота-космонавта, вертикально"))
+        photos = [c for c in session.calls if isinstance(c, SendPhoto)]
+        assert len(photos) == 1 and photos[0].reply_parameters.message_id == 90
+        assert "кота-космонавта" in photos[0].caption
+        model, prompt, source, ratio = xai.images[-1]
+        assert model == app.cfg.image_model and source is None and ratio == "9:16"
+        assert len(xai.chats) == n_chat
+        assert app.db.images_today(GROUP.id) == 1
+
+        # 2. reply to a photo: "переделай в аниме" -> edit with the photo as a data URI
+        pic = Message(message_id=91, date=NOW, chat=GROUP, from_user=OWNER,
+                      photo=[PhotoSize(file_id="p1", file_unique_id="u1", width=800, height=600, file_size=10)])
+        await dp.feed_update(bot, mention(92, "@it_test_bot переделай в стиле аниме", reply_to_message=pic))
+        assert xai.images[-1][2].startswith("data:image/jpeg;base64,")
+
+        # 3. ordinary questions and "как нарисовать" are answered by the chat model, not drawn
+        before = len(xai.images)
+        await dp.feed_update(bot, mention(93, "@it_test_bot как нарисовать кота?"))
+        await dp.feed_update(bot, mention(94, "@it_test_bot сделай саммари"))
+        assert len(xai.images) == before
+
+        # 4. /draw command, and a moderation refusal is explained
+        xai.image_error = APIError("xAI", 400, "Generated image rejected by content moderation")
+        session.calls.clear()
+        await dp.feed_update(bot, upd(message=Message(message_id=95, date=NOW, chat=GROUP, from_user=STRANGER,
+                                                      text="/draw что-то запрещённое")))
+        xai.image_error = None
+        assert any("фильтр" in m.text for m in session.sent())
+
+        # 5. per-user limit for non-owners (the owner is not limited)
+        session.calls.clear()
+        for i in range(draw_mod.USER_LIMIT + 1):
+            await dp.feed_update(bot, mention(100 + i, f"@it_test_bot нарисуй собаку {i}"))
+        assert any("за час" in m.text for m in session.sent())
+        session.calls.clear()
+        await dp.feed_update(bot, mention(120, "@it_test_bot нарисуй закат", user=OWNER))
+        assert [c for c in session.calls if isinstance(c, SendPhoto)]
+
+    draw_mod._user_log.clear()
     run(scenario())
 
 

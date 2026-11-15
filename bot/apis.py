@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -145,6 +146,27 @@ class XAIClient(_JsonAPI):
             input_tokens=int(usage.get("prompt_tokens") or 0),
             output_tokens=int(usage.get("completion_tokens") or 0),
         )
+
+    async def image(self, model: str, prompt: str, *, source: str | None = None,
+                    aspect_ratio: str | None = None) -> bytes:
+        """Grok Imagine: a new picture from text, or an edit of `source` (data: URI or URL). Returns image bytes."""
+        body: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1, "response_format": "b64_json"}
+        if aspect_ratio:
+            body["aspect_ratio"] = aspect_ratio
+        if source:
+            body["image"] = {"url": source, "type": "image_url"}
+        payload = await self._request("POST", "/images/edits" if source else "/images/generations",
+                                      json=body, attempts=2)
+        data = (payload.get("data") or [None])[0] if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise APIError(self.provider, None, "модель не вернула картинку")
+        if data.get("b64_json"):
+            return base64.b64decode(data["b64_json"])
+        if data.get("url"):
+            resp = await self._http.get(data["url"], headers={"Authorization": ""})
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+        raise APIError(self.provider, None, "модель не вернула картинку")
 
     async def respond(self, model: str, items: list[dict[str, Any]], *, search: bool = True,
                       max_turns: int = 5) -> ChatResult:

@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS usage (
     llm_requests  INTEGER NOT NULL DEFAULT 0,
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
+    images        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, chat_id)
 );
 """
@@ -99,6 +100,7 @@ class UsageTotals:
     llm_requests: int
     input_tokens: int
     output_tokens: int
+    images: int = 0
 
 
 def _today() -> str:
@@ -121,6 +123,8 @@ class Database:
         for col, default in (("download", 1), ("daily_summary", 0), ("delete_links", 1)):
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE chats ADD COLUMN {col} INTEGER NOT NULL DEFAULT {default}")
+        if "images" not in {r["name"] for r in self._conn.execute("PRAGMA table_info(usage)")}:
+            self._conn.execute("ALTER TABLE usage ADD COLUMN images INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self._conn.close()
@@ -309,29 +313,35 @@ class Database:
         llm_requests: int = 0,
         input_tokens: int = 0,
         output_tokens: int = 0,
+        images: int = 0,
     ) -> None:
         self._conn.execute(
             """
-            INSERT INTO usage(day, chat_id, stt_count, stt_seconds, llm_requests, input_tokens, output_tokens)
-            VALUES(?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO usage(day, chat_id, stt_count, stt_seconds, llm_requests, input_tokens, output_tokens, images)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(day, chat_id) DO UPDATE SET
                 stt_count=stt_count+excluded.stt_count,
                 stt_seconds=stt_seconds+excluded.stt_seconds,
                 llm_requests=llm_requests+excluded.llm_requests,
                 input_tokens=input_tokens+excluded.input_tokens,
-                output_tokens=output_tokens+excluded.output_tokens
+                output_tokens=output_tokens+excluded.output_tokens,
+                images=images+excluded.images
             """,
-            (_today(), chat_id, stt_count, stt_seconds, llm_requests, input_tokens, output_tokens),
+            (_today(), chat_id, stt_count, stt_seconds, llm_requests, input_tokens, output_tokens, images),
         )
+
+    def images_today(self, chat_id: int) -> int:
+        row = self._conn.execute("SELECT images FROM usage WHERE day=? AND chat_id=?", (_today(), chat_id)).fetchone()
+        return int(row[0]) if row else 0
 
     def usage_totals(self, day: str | None = None) -> UsageTotals:
         sql = (
             "SELECT COALESCE(SUM(stt_count),0), COALESCE(SUM(stt_seconds),0), COALESCE(SUM(llm_requests),0), "
-            "COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) FROM usage"
+            "COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(images),0) FROM usage"
         )
         params: tuple = ()
         if day == "today":
             sql += " WHERE day=?"
             params = (_today(),)
         row = self._conn.execute(sql, params).fetchone()
-        return UsageTotals(int(row[0]), float(row[1]), int(row[2]), int(row[3]), int(row[4]))
+        return UsageTotals(int(row[0]), float(row[1]), int(row[2]), int(row[3]), int(row[4]), int(row[5]))

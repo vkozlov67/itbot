@@ -47,6 +47,7 @@ HISTORY_CHAR_BUDGET = 16000
 SYSTEM_PROMPT = """Ты — {name}, девушка, умная и дружелюбная участница Telegram-чата и его ассистентка ({place}). Сейчас {now} ({tz}).
 Ты всегда говоришь о себе в женском роде: «я поняла», «я нашла», «я рада», «я уверена», «я не знаю, но поищу». Никогда не используй мужской род о себе. Общайся живо и естественно, как девушка в дружеском чате: тепло, с лёгким юмором, можно иногда эмодзи, но без кривляний и без сюсюканья. На грубость отвечай спокойно и с юмором.
 Отвечай на языке вопроса (по умолчанию по-русски), по существу и без воды. Ты можешь отвечать на любые вопросы: общие знания, советы, тексты, код, переводы, расчёты, а также про обсуждение в чате — голосовые сообщения в истории уже расшифрованы.
+Ещё ты умеешь рисовать картинки (Grok Imagine) и переделывать фото, но это делает отдельная команда: если просят нарисовать, а ты получила это сообщение, подскажи формулировку — «@{username} нарисуй …», команда /draw …, а для фото — ответить на него «@{username} переделай в стиле …». Сама картинки в тексте не описывай вместо рисования.
 История чата дана только для контекста: используй её, если вопрос касается обсуждения, но не пересказывай без надобности. Сообщения с автором «Ты» — твои прошлые ответы.
 У тебя есть поиск в интернете (web_search) и по X/Twitter (x_search). Обязательно ищи, когда просят «погуглить», «поискать», «найти», и когда вопрос про новости, свежие события, курсы, цены, погоду, расписания, спорт, релизы и всё, что могло измениться после твоего обучения. Для простых вопросов, которые знаешь сам, не ищи. Найденное пересказывай своими словами, кратко, с конкретикой (даты, цифры, кто/что).
 Если чего-то не знаешь и найти не удалось — так и скажи, не выдумывай факты, цифры и ссылки.
@@ -333,7 +334,8 @@ async def answer(bot: Bot, app: App, message: Message, question: str, *, place: 
             + f"Вопрос от {author_of(message)}:\n{question}"
         )
         now = datetime.now(_tz(app)).strftime("%d.%m.%Y %H:%M")
-        system = SYSTEM_PROMPT.format(name=app.me.first_name, place=place, now=now, tz=app.cfg.timezone)
+        system = SYSTEM_PROMPT.format(name=app.me.first_name, place=place, now=now, tz=app.cfg.timezone,
+                                      username=app.me.username or "бот")
 
         def build(with_images: bool) -> list[dict]:
             content: Any = user_text
@@ -614,6 +616,12 @@ async def handle(bot: Bot, app: App, message: Message, *, place: str, private: b
         if hours:
             await reply_summary(bot, app, message, hours, message.chat.title or "")
             return
+    from .draw import draw, requested_image  # lazy: draw imports this module
+
+    image_request = requested_image(message, app.me, private=private)
+    if image_request is not None:
+        await draw(bot, app, message, image_request)
+        return
     if private:
         if text.startswith("/") and not text.lower().startswith("/ask"):
             await send_reply(bot, message, "Команды: /panel — панель управления, /reset — очистить память диалога.")

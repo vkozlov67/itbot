@@ -389,3 +389,35 @@ def test_merge_cookies_keeps_other_sites():
     assert row(".youtube.com", "a", "1") in merged
     assert "old" not in merged and "#HttpOnly_" + row(".threads.com", "s", "new") in merged
     assert merged.startswith("# Netscape HTTP Cookie File")
+
+
+def test_draw_requests():
+    from bot.draw import aspect_ratio, requested_image
+    from aiogram.types import PhotoSize
+
+    def ask(text, **kw):
+        return requested_image(msg(f"@it_test_bot {text}", entities=[MessageEntity(type="mention", offset=0, length=12)],
+                                   **kw), ME, private=False)
+
+    for text in ["нарисуй кота", "Нарисуй, пожалуйста, закат", "можешь нарисовать дракона?", "сгенерируй картинку с котом",
+                 "сделай мем про понедельник", "создай аватарку в стиле пиксель-арт", "draw a cat"]:
+        assert ask(text) is not None, text
+    for text in ["как нарисовать кота?", "сделай саммари", "что ты умеешь?", "сделай вывод", "кто нарисовал Мону Лизу?"]:
+        assert ask(text) is None, text
+    assert requested_image(msg("нарисуй кота"), ME, private=False) is None  # not addressed in a group
+    assert requested_image(msg("нарисуй кота"), ME, private=True) is not None
+
+    photo = Message(message_id=5, date=NOW, chat=GROUP, from_user=ALICE,
+                    photo=[PhotoSize(file_id="p", file_unique_id="u", width=10, height=10)])
+    edit = ask("переделай в стиле аниме", reply=photo)
+    assert edit is not None and edit.source is photo
+    assert ask("что на фото?", reply=photo) is None
+    assert ask("нарисуй кота").source is None
+
+    cmd = requested_image(msg("/draw@it_test_bot космос"), ME, private=False)
+    assert cmd is not None and cmd.prompt == "космос"
+    assert requested_image(msg("/draw@other_bot космос"), ME, private=False) is None
+
+    assert aspect_ratio("обои на телефон") == "9:16"
+    assert aspect_ratio("16:9 горы") == "16:9"
+    assert aspect_ratio("кот") is None

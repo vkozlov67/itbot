@@ -47,6 +47,7 @@ class Config:
     summary_time: str
     context_messages: int
     max_parallel_requests: int
+    image_model: str = "grok-imagine-image-2.0"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -78,6 +79,7 @@ class Config:
             data_dir=data_dir,
             timezone=os.environ.get("TIMEZONE", "").strip() or "UTC",
             summary_time=os.environ.get("SUMMARY_TIME", "").strip() or "21:00",
+            image_model=os.environ.get("IMAGE_MODEL", "").strip() or "grok-imagine-image-2.0",
             context_messages=_int("CONTEXT_MESSAGES", 40),
             max_parallel_requests=_int("MAX_PARALLEL_REQUESTS", 4),
         )
