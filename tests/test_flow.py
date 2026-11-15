@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (
-    EditMessageText, GetChat, GetChatMember, GetFile, SendDocument, SendMessage, SendPhoto, SendVideo,
+    AnswerCallbackQuery, EditMessageText, GetChat, GetChatMember, GetFile, SendDocument, SendMessage, SendPhoto, SendVideo,
 )
 from aiogram.types import (
     Audio, Document, Video, VideoNote,
@@ -37,12 +37,15 @@ class FakeSession(BaseSession):
         super().__init__()
         self.calls = []
         self.n = 1000
+        self.fail_answer = False
 
     async def close(self):
         pass
 
     async def make_request(self, bot, method, timeout=None):
         self.calls.append(method)
+        if self.fail_answer and isinstance(method, AnswerCallbackQuery):
+            raise TelegramBadRequest(method=method, message="Bad Request: query is too old")
         if isinstance(method, (SendMessage, EditMessageText, SendVideo, SendPhoto, SendDocument)):
             self.n += 1
             chat_id = method.chat_id
@@ -234,12 +237,21 @@ def test_full_flow(env):
 
         # 7. stranger cannot press panel buttons; owner can enable the chat
         panel_msg = Message(message_id=900, date=NOW, chat=Chat(id=OWNER.id, type="private"), from_user=ME, text="x")
-        data = Panel(a="tog", c=OTHER.id, v="enabled").pack()
+        data = Panel(a="set", c=OTHER.id, v="enabled=1").pack()
         await dp.feed_update(bot, upd(callback_query=CallbackQuery(id="c1", from_user=STRANGER, chat_instance="i",
                                                                    message=panel_msg, data=data)))
         assert not app.db.get_chat(OTHER.id).enabled
-        await dp.feed_update(bot, upd(callback_query=CallbackQuery(id="c2", from_user=OWNER, chat_instance="i",
-                                                                   message=panel_msg, data=data)))
+        # pressing "Включить" several times (delayed updates) keeps it on; a late answer error doesn't abort it
+        session.fail_answer = True
+        for i in range(4):
+            await dp.feed_update(bot, upd(callback_query=CallbackQuery(id=f"c2{i}", from_user=OWNER, chat_instance="i",
+                                                                       message=panel_msg, data=data)))
+        session.fail_answer = False
+        assert app.db.get_chat(OTHER.id).enabled
+        # legacy toggle buttons no longer flip anything
+        await dp.feed_update(bot, upd(callback_query=CallbackQuery(
+            id="c2x", from_user=OWNER, chat_instance="i", message=panel_msg,
+            data=Panel(a="tog", c=OTHER.id, v="enabled").pack())))
         assert app.db.get_chat(OTHER.id).enabled
 
         # 8. models view + switching model

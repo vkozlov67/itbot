@@ -36,6 +36,10 @@ class Panel(CallbackData, prefix="p"):
     v: str = ""  # value
 
 
+FLAG_LABELS = {"enabled": "Бот", "transcribe": "Расшифровка", "answer": "Ответы", "download": "Скачивание",
+               "daily_summary": "Итоги дня"}
+
+
 def btn(text: str, **kw) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=Panel(**kw).pack())
 
@@ -199,16 +203,17 @@ async def chat_view(bot: Bot, app: App, chat_id: int) -> tuple[str, InlineKeyboa
             "⚠️ Бот не администратор — Telegram не показывает ему голосовые и обычные сообщения. "
             "Назначьте бота администратором чата (достаточно прав без галочек).",
         ]
+    def flip(text: str, flag: str) -> InlineKeyboardButton:  # sets the opposite value explicitly (idempotent)
+        return btn(text, a="set", c=row.chat_id, v=f"{flag}={0 if getattr(row, flag) else 1}")
+
     kb = [
-        [btn("⏸ Выключить бота" if row.enabled else "▶️ Включить бота", a="tog", c=row.chat_id, v="enabled")],
+        [flip("⏸ Выключить бота" if row.enabled else "▶️ Включить бота", "enabled")],
         [
-            btn(f"🎙 Расшифровка: {'вкл' if row.transcribe else 'выкл'}", a="tog", c=row.chat_id, v="transcribe"),
-            btn(f"💬 Ответы: {'вкл' if row.answer else 'выкл'}", a="tog", c=row.chat_id, v="answer"),
+            flip(f"🎙 Расшифровка: {'вкл' if row.transcribe else 'выкл'}", "transcribe"),
+            flip(f"💬 Ответы: {'вкл' if row.answer else 'выкл'}", "answer"),
         ],
-        [btn(f"📥 Скачивание по ссылкам: {'вкл' if row.download else 'выкл'}", a="tog", c=row.chat_id,
-             v="download")],
-        [btn(f"🗞 Итоги дня в {app.cfg.summary_time}: {'вкл' if row.daily_summary else 'выкл'}", a="tog",
-             c=row.chat_id, v="daily_summary")],
+        [flip(f"📥 Скачивание по ссылкам: {'вкл' if row.download else 'выкл'}", "download")],
+        [flip(f"🗞 Итоги дня в {app.cfg.summary_time}: {'вкл' if row.daily_summary else 'выкл'}", "daily_summary")],
         [btn("🧹 Очистить память", a="clr", c=row.chat_id)],
         [btn("🚪 Выйти из чата", a="leave", c=row.chat_id)],
         [btn("« Назад", a="home")],
@@ -260,6 +265,14 @@ def cookies_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         rows.append([btn("🗑 Удалить cookies", a="ckdel")])
     rows.append([btn("« Назад", a="home")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _ack(cb: CallbackQuery, text: str | None = None, show_alert: bool = False) -> None:
+    """Answer a button press; a late answer ("query is too old") must not abort the action itself."""
+    try:
+        await cb.answer(text, show_alert=show_alert)
+    except TelegramBadRequest as exc:
+        log.info("callback answer skipped: %s", exc)
 
 
 async def _show(cb: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
@@ -360,67 +373,72 @@ async def on_cookies_file(message: Message, bot: Bot, app: App) -> None:
 @router.callback_query(Panel.filter())
 async def on_panel_cb(cb: CallbackQuery, callback_data: Panel, bot: Bot, app: App) -> None:
     if not app.is_owner(cb.from_user):
-        await cb.answer("Только для владельца", show_alert=True)
+        await _ack(cb, "Только для владельца", show_alert=True)
         return
     if not isinstance(cb.message, Message):
-        await cb.answer("Сообщение устарело — отправьте /panel")
+        await _ack(cb, "Сообщение устарело — отправьте /panel")
         return
     a, chat_id = callback_data.a, callback_data.c
 
     if a == "home":
         await _show(cb, *(await home_view(app)))
-        await cb.answer()
+        await _ack(cb)
         return
 
     if a == "models":
-        await cb.answer("Загружаю список…")
+        await _ack(cb, "Загружаю список…")
         await _show(cb, *(await models_view(app)))
         return
 
     if a == "cookies":
-        await cb.answer()
+        await _ack(cb)
         await _show(cb, *cookies_view(app))
         return
 
     if a == "ckdel":
         app.cookies_path.unlink(missing_ok=True)
-        await cb.answer("Cookies удалены")
+        await _ack(cb, "Cookies удалены")
         await _show(cb, *cookies_view(app))
         return
 
     if a == "setm":
         app.db.set_setting("chat_model", callback_data.v)
-        await cb.answer(f"Модель: {callback_data.v}")
+        await _ack(cb, f"Модель: {callback_data.v}")
         await _show(cb, *(await models_view(app)))
         return
 
     row = app.db.get_chat(chat_id)
     if row is None:
-        await cb.answer("Чат не найден", show_alert=True)
+        await _ack(cb, "Чат не найден", show_alert=True)
         await _show(cb, *(await home_view(app)))
         return
 
     if a == "chat":
         view = await chat_view(bot, app, chat_id)
         if view is None:
-            await cb.answer("Бота уже нет в этом чате", show_alert=True)
+            await _ack(cb, "Бота уже нет в этом чате", show_alert=True)
             await _show(cb, *(await home_view(app)))
         else:
-            await cb.answer()
+            await _ack(cb)
             await _show(cb, *view)
         return
 
-    if a == "tog":
-        flag = callback_data.v
-        if flag not in ("enabled", "transcribe", "answer", "download", "daily_summary"):
-            await cb.answer()
+    if a == "tog":  # buttons from older versions toggled blindly — just show the current state
+        await _ack(cb, "Кнопка устарела — вот актуальные настройки")
+        view = await chat_view(bot, app, chat_id)
+        await _show(cb, *(view or await home_view(app)))
+        return
+
+    if a == "set":
+        flag, _, value = callback_data.v.partition("=")
+        if flag not in FLAG_LABELS or value not in ("0", "1"):
+            await _ack(cb)
             return
-        new_value = not getattr(row, flag)
+        new_value = value == "1"
+        changed = bool(getattr(row, flag)) != new_value
         app.db.set_flag(chat_id, flag, new_value)
-        label = {"enabled": "Бот", "transcribe": "Расшифровка", "answer": "Ответы", "download": "Скачивание",
-                 "daily_summary": "Итоги дня"}[flag]
-        await cb.answer(f"{label}: {'включено' if new_value else 'выключено'}")
-        if flag == "enabled" and new_value:
+        await _ack(cb, f"{FLAG_LABELS[flag]}: {'включено' if new_value else 'выключено'}")
+        if flag == "enabled" and new_value and changed:
             await announce(bot, app, chat_id)
         view = await chat_view(bot, app, chat_id)
         await _show(cb, *(view or await home_view(app)))
@@ -428,13 +446,13 @@ async def on_panel_cb(cb: CallbackQuery, callback_data: Panel, bot: Bot, app: Ap
 
     if a == "clr":
         app.db.clear_history(chat_id)
-        await cb.answer("Память чата очищена")
+        await _ack(cb, "Память чата очищена")
         view = await chat_view(bot, app, chat_id)
         await _show(cb, *(view or await home_view(app)))
         return
 
     if a == "leave":
-        await cb.answer()
+        await _ack(cb)
         await _show(
             cb,
             f"Выйти из чата <b>{esc(row.title)}</b>? Чтобы вернуть бота, его придётся добавить заново.",
@@ -454,11 +472,11 @@ async def on_panel_cb(cb: CallbackQuery, callback_data: Panel, bot: Bot, app: Ap
             log.warning("leave_chat %s: %s", chat_id, exc)
         app.db.set_flag(chat_id, "enabled", False)
         app.db.set_status(chat_id, "left")
-        await cb.answer("Бот вышел из чата")
+        await _ack(cb, "Бот вышел из чата")
         await _show(cb, *(await home_view(app)))
         return
 
-    await cb.answer()
+    await _ack(cb)
 
 
 async def announce(bot: Bot, app: App, chat_id: int) -> None:
@@ -483,8 +501,8 @@ async def announce(bot: Bot, app: App, chat_id: int) -> None:
 
 
 def chat_actions_markup(chat_id: int, enabled: bool) -> InlineKeyboardMarkup:
-    first = btn("⏸ Выключить", a="tog", c=chat_id, v="enabled") if enabled else btn(
-        "✅ Включить", a="tog", c=chat_id, v="enabled"
+    first = btn("⏸ Выключить", a="set", c=chat_id, v="enabled=0") if enabled else btn(
+        "✅ Включить", a="set", c=chat_id, v="enabled=1"
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
