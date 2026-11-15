@@ -22,7 +22,7 @@ from .app import App
 from .db import ChatRow
 from .textutil import esc, fmt_duration, fmt_tokens
 from .apis import APIError
-from .downloader import SERVICES, cookie_domains, looks_like_cookies
+from .downloader import SERVICES, cookie_domains, looks_like_cookies, merge_cookies
 
 log = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -259,7 +259,8 @@ def cookies_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         "1. Войдите на нужные сайты в браузере на компьютере (лучше с запасного аккаунта).",
         "2. Поставьте расширение «Get cookies.txt LOCALLY» (Chrome/Firefox) и экспортируйте cookies "
         "в формате Netscape.",
-        "3. Пришлите файл <code>cookies.txt</code> сюда, в личку боту. Можно один файл с cookies нескольких сайтов.",
+        "3. Пришлите файл <code>cookies.txt</code> сюда, в личку боту. Файлы добавляются: можно присылать "
+        "по одному на сайт, новый файл заменяет cookies только тех сайтов, что в нём есть.",
         "",
         "Сейчас: " + (", ".join(esc(d) for d in domains[:15]) if domains else "cookies не загружены"),
     ]
@@ -359,8 +360,13 @@ async def on_cookies_file(message: Message, bot: Bot, app: App) -> None:
     if not looks_like_cookies(data):
         await message.answer("Это не похоже на cookies.txt в формате Netscape. См. /panel → 🍪 Cookies.")
         return
+    try:
+        old = app.cookies_path.read_text(encoding="utf-8", errors="replace") if app.cookies_path.exists() else ""
+    except OSError:
+        old = ""
+    merged = merge_cookies(old, data.decode("utf-8", errors="replace"))
     tmp = app.cookies_path.with_suffix(".tmp")
-    tmp.write_bytes(data)
+    tmp.write_text(merged, encoding="utf-8")
     tmp.chmod(0o600)
     tmp.replace(app.cookies_path)
     domains = cookie_domains(app.cookies_path)

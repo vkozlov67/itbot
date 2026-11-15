@@ -469,6 +469,24 @@ def cookie_domains(path: Path) -> list[str]:
     return sorted(domains)
 
 
+def _cookie_domain(line: str) -> str | None:
+    if line.startswith("#HttpOnly_"):
+        line = line[len("#HttpOnly_"):]
+    elif line.startswith("#") or not line.strip():
+        return None
+    parts = line.split("\t")
+    return parts[0].lstrip(".").removeprefix("www.").lower() if len(parts) >= 7 else None
+
+
+def merge_cookies(old: str, new: str) -> str:
+    """Add an uploaded cookies.txt to the stored one: sites in the new file replace the same sites
+    in the old file, everything else is kept (so cookies can be sent one site at a time)."""
+    new_domains = {d for d in map(_cookie_domain, new.splitlines()) if d}
+    kept = [line for line in old.splitlines() if (d := _cookie_domain(line)) and d not in new_domains]
+    added = [line for line in new.splitlines() if _cookie_domain(line)]
+    return "# Netscape HTTP Cookie File\n" + "\n".join(kept + added) + "\n"
+
+
 def looks_like_cookies(data: bytes) -> bool:
     head = data[:2000].decode("utf-8", errors="replace")
     if "Netscape HTTP Cookie File" in head or "HTTP Cookie File" in head:

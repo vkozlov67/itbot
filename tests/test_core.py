@@ -378,3 +378,14 @@ def test_download_caption_quote_and_overflow(tmp_path):
     assert "blockquote" not in cap and extra == long_text
     cap, extra = _download_caption(Download(link=link, title="t", uploader=""))
     assert "blockquote" not in cap and extra == ""
+
+
+def test_merge_cookies_keeps_other_sites():
+    from bot.downloader import merge_cookies
+    row = lambda dom, name, val: "\t".join([dom, "TRUE", "/", "TRUE", "0", name, val])
+    old = "# Netscape HTTP Cookie File\n" + "\n".join([row(".youtube.com", "a", "1"), row(".threads.com", "s", "old")])
+    new = "# Netscape HTTP Cookie File\n#HttpOnly_" + row(".threads.com", "s", "new") + "\n"
+    merged = merge_cookies(old, new)
+    assert row(".youtube.com", "a", "1") in merged
+    assert "old" not in merged and "#HttpOnly_" + row(".threads.com", "s", "new") in merged
+    assert merged.startswith("# Netscape HTTP Cookie File")
