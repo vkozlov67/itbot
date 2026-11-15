@@ -382,10 +382,31 @@ async def _react(bot: Bot, message: Message, emoji: str | None) -> None:
         pass  # reactions may be disabled in the chat; purely cosmetic
 
 
-async def _send_download(bot: Bot, message: Message, dl: Download) -> Message:
-    caption = f'📥 <a href="{html.escape(dl.link.url, quote=True)}">{dl.link.service}</a>'
+CAPTION_LIMIT = 1000  # Telegram allows 1024 chars after HTML parsing; keep a margin (emoji = 2 UTF-16 units)
+
+
+def _u16(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _download_caption(dl: Download) -> tuple[str, str]:
+    """(caption html, overflow text). The post text goes into a collapsible quote; if it doesn't fit
+    into the caption it is returned as overflow and sent as a separate reply."""
+    head_html = f'📥 <a href="{html.escape(dl.link.url, quote=True)}">{dl.link.service}</a>'
+    head_plain = f"📥 {dl.link.service}"
     if dl.uploader and dl.uploader.lower() != dl.link.service.lower():
-        caption += f" · {esc(dl.uploader)}"
+        head_html += f" · {esc(dl.uploader)}"
+        head_plain += f" · {dl.uploader}"
+    text = dl.description.strip()
+    if not text:
+        return head_html, ""
+    if _u16(head_plain) + 1 + _u16(text) <= CAPTION_LIMIT:
+        return f"{head_html}\n<blockquote expandable>{esc(text)}</blockquote>", ""
+    return head_html, text
+
+
+async def _send_download(bot: Bot, message: Message, dl: Download) -> Message:
+    caption, overflow = _download_caption(dl)
     common: dict[str, Any] = dict(
         chat_id=message.chat.id,
         reply_parameters=ReplyParameters(message_id=message.message_id, allow_sending_without_reply=True),
@@ -393,6 +414,22 @@ async def _send_download(bot: Bot, message: Message, dl: Download) -> Message:
     )
     if thread_id(message):
         common["message_thread_id"] = thread_id(message)
+    try:
+        sent = await _send_media(bot, dl, caption, common)
+    except TelegramBadRequest as exc:
+        if "caption" not in str(exc).lower() or not dl.description:
+            raise
+        # caption rejected as too long: header only, post text goes into a separate reply
+        caption = _download_caption(Download(link=dl.link, title=dl.title, uploader=dl.uploader))[0]
+        overflow = dl.description
+        sent = await _send_media(bot, dl, caption, common)
+    if overflow:
+        for chunk in split_text(overflow, 3500):
+            await send_reply(bot, sent, f"<blockquote expandable>{esc(chunk)}</blockquote>", fallback=chunk)
+    return sent
+
+
+async def _send_media(bot: Bot, dl: Download, caption: str, common: dict[str, Any]) -> Message:
     items = dl.items
     if len(items) == 1:
         it = items[0]
@@ -449,9 +486,10 @@ async def download_links(bot: Bot, app: App, message: Message, links: list[Link]
             await _react(bot, message, "🤷")
         else:
             await _react(bot, message, None)
-            title = f": {dl.title}" if dl.title else ""
+            what = f"(скачано из {link.service}" + (f", автор {dl.uploader}" if dl.uploader else "") + ")"
+            body = dl.description or dl.title
             app.db.add_message(message.chat.id, sent.message_id, app.me.id, "Бот", "video",
-                               f"(скачано из {link.service}{title})", int(sent.date.timestamp()))
+                               f"{what}\n{body}" if body else what, int(sent.date.timestamp()))
 
 
 def _without_links(message: Message) -> str:

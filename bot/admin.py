@@ -249,7 +249,7 @@ def cookies_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         "<b>🍪 Cookies для скачивания видео</b>",
         "",
         f"Бот скачивает видео по ссылкам: {services}.",
-        "Instagram, X, VK, Facebook и Pinterest работают без входа. YouTube, TikTok и Reddit с сервера "
+        "Instagram, Threads, X, VK, Facebook и Pinterest работают без входа. YouTube, TikTok и Reddit с сервера "
         "отдают видео только залогиненным — для них нужны cookies.",
         "",
         "<b>Как добавить:</b>",
@@ -487,7 +487,7 @@ async def announce(bot: Bot, app: App, chat_id: int) -> None:
     if row.transcribe:
         parts.append("🎙 расшифровываю голосовые и кружки")
     if row.download:
-        parts.append("📥 скачиваю видео и фото по ссылкам (Instagram, X, VK, Facebook, Pinterest…)")
+        parts.append("📥 скачиваю видео и фото по ссылкам вместе с текстом поста (Instagram, Threads, X, VK, Facebook, Pinterest…)")
     if row.answer:
         parts.append("🗞 /summary — итоги чата за сутки")
     if row.answer:

@@ -324,7 +324,10 @@ def test_reply_mention_search_and_link_download(env, monkeypatch, tmp_path):
         f = tmp_path / "reel.mp4"
         f.write_bytes(b"mp4")
         return Download(link=link, title="Funny reel", uploader="someone",
-                        items=[Item(path=f, is_image=False, width=720, height=1280, duration=5)])
+                        items=[Item(path=f, is_image=False, width=720, height=1280, duration=5)],
+                        description=desc.pop(0) if desc else "")
+
+    desc = ["Подпись <b>под</b> рилсом #тег"]
 
     monkeypatch.setattr(chat, "download", fake_download)
 
@@ -369,6 +372,10 @@ def test_reply_mention_search_and_link_download(env, monkeypatch, tmp_path):
         videos = [c for c in session.calls if isinstance(c, SendVideo)]
         assert len(videos) == 1 and videos[0].reply_parameters.message_id == 73 and videos[0].width == 720
         assert "Instagram" in videos[0].caption and "someone" in videos[0].caption
+        assert "<blockquote expandable>Подпись &lt;b&gt;под&lt;/b&gt; рилсом #тег</blockquote>" in videos[0].caption
+        # the post text is remembered, so the bot can answer questions about the reel
+        assert any(m.kind == "video" and "Подпись" in m.text and "someone" in m.text
+                   for m in app.db.recent_messages(GROUP.id, 10))
         reactions = [c.reaction for c in session.calls if isinstance(c, SetMessageReaction)]
         assert reactions[0][0].emoji == "👀" and reactions[-1] == []
         assert len(xai.chats) == n_chat

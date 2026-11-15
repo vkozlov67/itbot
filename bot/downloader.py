@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import shutil
@@ -35,7 +36,12 @@ SERVICES: list[tuple[str, re.Pattern[str]]] = [
     ("Reddit", re.compile(r"^https?://(?:(?:www|old|new)\.reddit\.com/r/\w+/(?:comments|s)/\w+|v\.redd\.it/\w+)", re.I)),
     ("Pinterest", re.compile(r"^https?://(?:(?:\w+\.)?pinterest\.[a-z.]+/pin/[\w-]+|pin\.it/\w+)", re.I)),
     ("Twitch", re.compile(r"^https?://(?:clips\.twitch\.tv/[\w-]+|(?:www\.)?twitch\.tv/\w+/clip/[\w-]+)", re.I)),
+    ("Threads", re.compile(r"^https?://(?:www\.)?threads\.(?:net|com)/@[\w.]+/post/[\w-]+", re.I)),
 ]
+
+# Services whose post text (caption) is worth sending along with the media.
+CAPTION_SERVICES = {"Instagram", "Threads", "X", "TikTok", "Reddit"}
+MAX_DESCRIPTION = 4000
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,7 @@ class Download:
     uploader: str
     items: list[Item] = field(default_factory=list)
     tmpdir: Path | None = None
+    description: str = ""  # the post's own text (Instagram caption, tweet, Threads post…)
 
     def cleanup(self) -> None:
         if self.tmpdir:
@@ -206,7 +213,16 @@ def _files(outdir: Path) -> list[Path]:
     return sorted(p for p in outdir.iterdir() if p.is_file() and not p.name.endswith((".part", ".ytdl", ".temp")))
 
 
+def _description(link: Link, info: dict[str, Any], entries: list[dict[str, Any]]) -> str:
+    if link.service not in CAPTION_SERVICES:
+        return ""
+    text = info.get("description") or next((e.get("description") for e in entries if e.get("description")), "")
+    return str(text or "").strip()[:MAX_DESCRIPTION]
+
+
 async def download(link: Link, cookies: Path | None = None) -> Download:
+    if link.service == "Threads":
+        return await _download_threads(link)
     tmpdir = Path(tempfile.mkdtemp(prefix="itbot-dl-"))
     try:
         last_error = DownloadError("failed", "ничего не скачалось")
@@ -245,8 +261,130 @@ async def download(link: Link, cookies: Path | None = None) -> Download:
                 uploader=str(info.get("uploader") or info.get("channel") or info.get("uploader_id") or "")[:64],
                 items=items,
                 tmpdir=tmpdir,
+                description=_description(link, info, entries),
             )
         raise last_error
+    except BaseException:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+
+
+# ---------------------------------------------------------------- Threads (no yt-dlp extractor)
+THREADS_CODE_RE = re.compile(r"threads\.(?:net|com)/@([\w.]+)/post/([\w-]+)", re.I)
+THREADS_JSON_RE = re.compile(r'<script type="application/json"[^>]*data-sjs[^>]*>(.*?)</script>', re.S)
+
+
+def _threads_post(html_text: str, code: str) -> dict[str, Any] | None:
+    """The post object (caption, user, media) embedded in the page's JSON blobs."""
+    best: dict[str, Any] | None = None
+
+    def walk(o: Any) -> None:
+        nonlocal best
+        if isinstance(o, dict):
+            if o.get("code") == code and ("caption" in o or "image_versions2" in o or "video_versions" in o):
+                if best is None or len(o) > len(best):
+                    best = o
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    for blob in THREADS_JSON_RE.findall(html_text):
+        if code not in blob:
+            continue
+        try:
+            walk(json.loads(blob))
+        except ValueError:
+            continue
+    return best
+
+
+def _threads_media(post: dict[str, Any]) -> list[dict[str, Any]]:
+    """[{url, is_image, width, height}] for every photo/video of the post (carousel or single)."""
+    out = []
+    for m in (post.get("carousel_media") or [post])[:MAX_ITEMS]:
+        if not isinstance(m, dict):
+            continue
+        videos = [v for v in m.get("video_versions") or [] if isinstance(v, dict) and v.get("url")]
+        if videos:
+            v = max(videos, key=lambda v: (v.get("width") or 0) * (v.get("height") or 0))
+            out.append({"url": v["url"], "is_image": False, "width": v.get("width") or m.get("original_width"),
+                        "height": v.get("height") or m.get("original_height")})
+            continue
+        cands = [c for c in ((m.get("image_versions2") or {}).get("candidates") or [])
+                 if isinstance(c, dict) and c.get("url")]
+        if cands:
+            c = max(cands, key=lambda c: (c.get("width") or 0) * (c.get("height") or 0))
+            out.append({"url": c["url"], "is_image": True, "width": c.get("width"), "height": c.get("height")})
+    return out
+
+
+def _threads_fetch(link: Link, outdir: Path) -> tuple[str, str, list[Item]]:
+    from curl_cffi import requests as cffi  # installed with yt-dlp[curl-cffi]; looks like a real browser
+
+    m = THREADS_CODE_RE.search(link.url)
+    if not m:
+        raise DownloadError("no_media", "not a Threads post link")
+    user, code = m.groups()
+    session = cffi.Session(impersonate="chrome")
+    try:
+        r = session.get(f"https://www.threads.com/@{user}/post/{code}", timeout=30)
+        if r.status_code == 404:
+            raise DownloadError("no_media", "post not found")
+        if r.status_code != 200:
+            raise DownloadError("failed", f"Threads HTTP {r.status_code}")
+        post = _threads_post(r.text, code)
+        if post is None:
+            raise DownloadError("auth" if "login" in r.url else "failed", "post data not found on the page")
+        caption = str(((post.get("caption") or {}).get("text")) or "").strip()
+        author = str((post.get("user") or {}).get("username") or user)
+        media = _threads_media(post)
+        if not media:
+            raise DownloadError("no_media", "text-only post")
+        items = []
+        for i, md in enumerate(media, 1):
+            path_part = md["url"].split("?", 1)[0].lower()
+            ext = "mp4" if not md["is_image"] else ("webp" if path_part.endswith(".webp") else
+                                                     "png" if path_part.endswith(".png") else "jpg")
+            path = outdir / f"{i:02d}-{code}.{ext}"
+            resp = session.get(md["url"], timeout=120, stream=True)
+            if resp.status_code != 200:
+                raise DownloadError("failed", f"Threads media HTTP {resp.status_code}")
+            size, too_big = 0, False
+            with path.open("wb") as f:
+                for chunk in resp.iter_content():
+                    size += len(chunk)
+                    if size > TG_UPLOAD_LIMIT:
+                        too_big = True
+                        break
+                    f.write(chunk)
+            resp.close()
+            if too_big:
+                path.unlink(missing_ok=True)
+                continue
+            items.append(Item(path=path, is_image=md["is_image"], width=_int(md["width"]), height=_int(md["height"])))
+        if not items:
+            raise DownloadError("too_big", f"файл больше {TG_UPLOAD_LIMIT // 1024 // 1024} МБ")
+        return caption, author, items
+    finally:
+        session.close()
+
+
+async def _download_threads(link: Link) -> Download:
+    tmpdir = Path(tempfile.mkdtemp(prefix="itbot-dl-"))
+    try:
+        try:
+            caption, author, items = await asyncio.wait_for(
+                asyncio.to_thread(_threads_fetch, link, tmpdir), DOWNLOAD_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            raise DownloadError("failed", "скачивание заняло слишком много времени") from exc
+        except DownloadError:
+            raise
+        except Exception as exc:  # network errors from curl_cffi
+            raise DownloadError("failed", str(exc)[:300]) from exc
+        return Download(link=link, title=caption[:200], uploader=author[:64], items=items, tmpdir=tmpdir,
+                        description=caption[:MAX_DESCRIPTION])
     except BaseException:
         shutil.rmtree(tmpdir, ignore_errors=True)
         raise

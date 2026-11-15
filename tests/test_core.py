@@ -333,3 +333,43 @@ def test_instagram_photo_extractor_keeps_photos():
     video = {"pk": "1", "video_versions": [{"url": "https://cdn.example/v.mp4", "width": 720, "height": 1280, "type": 101}]}
     vformats = ie._extract_product_media(video)["formats"]
     assert vformats and all(f.get("format_id") != "image" for f in vformats)
+
+
+# ---------------- Threads + post captions
+def test_threads_links_and_page_parsing():
+    import json
+    from bot.downloader import _threads_media, _threads_post
+    m = msg("https://www.threads.net/@zuck/post/DfNR0zhEdWv?x=1 и https://www.threads.com/@zuck",
+            entities=[MessageEntity(type="url", offset=0, length=50)])
+    assert [l.service for l in find_links(m)] == ["Threads"]
+
+    post = {
+        "code": "ABC", "caption": {"text": "Текст поста"}, "user": {"username": "neo"},
+        "carousel_media": [
+            {"image_versions2": {"candidates": [{"url": "https://cdn/s.jpg", "width": 100, "height": 100},
+                                                {"url": "https://cdn/b.jpg", "width": 1080, "height": 1350}]}},
+            {"video_versions": [{"url": "https://cdn/v.mp4", "width": 720, "height": 1280}],
+             "image_versions2": {"candidates": [{"url": "https://cdn/cover.jpg", "width": 720, "height": 1280}]}},
+        ],
+    }
+    page = ('<script type="application/json" data-sjs>{"x": {"code": "ABC"}}</script>'
+            f'<script type="application/json" data-content-len="1" data-sjs>{json.dumps({"a": [post]})}</script>')
+    found = _threads_post(page, "ABC")
+    assert found is not None and found["caption"]["text"] == "Текст поста"
+    media = _threads_media(found)
+    assert [(x["url"], x["is_image"]) for x in media] == [("https://cdn/b.jpg", True), ("https://cdn/v.mp4", False)]
+    assert _threads_post(page, "OTHER") is None
+    assert _threads_media({"code": "T", "caption": {"text": "только текст"}}) == []
+
+
+def test_download_caption_quote_and_overflow(tmp_path):
+    from bot.chat import _download_caption
+    from bot.downloader import Download, Link
+    link = Link("https://www.instagram.com/reel/X/", "Instagram")
+    cap, extra = _download_caption(Download(link=link, title="t", uploader="neo", description="Привет <3"))
+    assert cap.endswith("<blockquote expandable>Привет &lt;3</blockquote>") and "neo" in cap and extra == ""
+    long_text = "😀" * 600  # 1200 UTF-16 units: too long for a caption
+    cap, extra = _download_caption(Download(link=link, title="t", uploader="neo", description=long_text))
+    assert "blockquote" not in cap and extra == long_text
+    cap, extra = _download_caption(Download(link=link, title="t", uploader=""))
+    assert "blockquote" not in cap and extra == ""
