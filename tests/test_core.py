@@ -56,12 +56,11 @@ def test_split_text():
 
 
 def test_transcript_messages():
-    assert transcript_messages("привет", 3) == ["🎙 <b>Расшифровка</b> · 3 с\n<blockquote expandable>привет</blockquote>"]
-    assert transcript_messages("a < b", 0) == ["🎙 <b>Расшифровка</b>\n<blockquote expandable>a &lt; b</blockquote>"]
+    assert transcript_messages("привет", 3) == ["<blockquote expandable>привет</blockquote>"]
+    assert transcript_messages("a < b", 0) == ["<blockquote expandable>a &lt; b</blockquote>"]
     long = transcript_messages("слово " * 1000, 125)
-    assert long[0].startswith("🎙 <b>Расшифровка</b> · 2:05 (1/")
-    assert all("<blockquote expandable>" in p for p in long)
-    assert transcript_messages("(речь не распознана)", 1) == ["🎙 <i>Речь не распознана</i>"]
+    assert len(long) == 2 and all(p.startswith("<blockquote expandable>") for p in long)
+    assert transcript_messages("(речь не распознана)", 1) == ["<blockquote><i>речь не распознана</i></blockquote>"]
 
 
 # ---------------- addressing
@@ -119,12 +118,18 @@ def test_db_chats_and_migration(tmp_path: Path):
     assert len(db.list_chats(active_only=False)) == 1
 
 
-def test_db_history_and_usage(tmp_path: Path):
+def test_db_history_and_usage(tmp_path: Path, monkeypatch):
+    import time
+    import bot.db as dbmod
+    monkeypatch.setattr(dbmod, "HISTORY_KEEP", 300)
     db = Database(tmp_path / "t.sqlite3")
+    now = int(time.time())
+    db.add_message(-5, 0, 1, "A", "text", "old", date=now - 4 * 86400)
     for i in range(1, 400):
-        db.add_message(-5, i, 1, "A", "text", f"m{i}")
+        db.add_message(-5, i, 1, "A", "text", f"m{i}", date=now - 3600)
     db._prune(-5)
-    assert db.count_messages(-5) == 300
+    assert db.count_messages(-5) == 300 and db.get_message(-5, 0) is None
+    assert len(db.messages_since(-5, now - 7200)) == 300 and db.messages_since(-5, now) == []
     recent = db.recent_messages(-5, 3, before_message_id=399)
     assert [m.text for m in recent] == ["m396", "m397", "m398"]
     db.add_usage(-5, stt_count=1, stt_seconds=10.5)

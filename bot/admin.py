@@ -44,7 +44,11 @@ def btn(text: str, **kw) -> InlineKeyboardButton:
 async def setup_commands(bot: Bot, app: App) -> None:
     try:
         await bot.set_my_commands(
-            [BotCommand(command="ask", description="Задать вопрос боту")], scope=BotCommandScopeAllGroupChats()
+            [
+                BotCommand(command="ask", description="Задать вопрос"),
+                BotCommand(command="summary", description="Итоги чата за сутки (/summary 6 — за 6 часов)"),
+            ],
+            scope=BotCommandScopeAllGroupChats(),
         )
         await bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
         if app.owner_id:
@@ -203,6 +207,8 @@ async def chat_view(bot: Bot, app: App, chat_id: int) -> tuple[str, InlineKeyboa
         ],
         [btn(f"📥 Скачивание по ссылкам: {'вкл' if row.download else 'выкл'}", a="tog", c=row.chat_id,
              v="download")],
+        [btn(f"🗞 Итоги дня в {app.cfg.summary_time}: {'вкл' if row.daily_summary else 'выкл'}", a="tog",
+             c=row.chat_id, v="daily_summary")],
         [btn("🧹 Очистить память", a="clr", c=row.chat_id)],
         [btn("🚪 Выйти из чата", a="leave", c=row.chat_id)],
         [btn("« Назад", a="home")],
@@ -406,12 +412,13 @@ async def on_panel_cb(cb: CallbackQuery, callback_data: Panel, bot: Bot, app: Ap
 
     if a == "tog":
         flag = callback_data.v
-        if flag not in ("enabled", "transcribe", "answer", "download"):
+        if flag not in ("enabled", "transcribe", "answer", "download", "daily_summary"):
             await cb.answer()
             return
         new_value = not getattr(row, flag)
         app.db.set_flag(chat_id, flag, new_value)
-        label = {"enabled": "Бот", "transcribe": "Расшифровка", "answer": "Ответы", "download": "Скачивание"}[flag]
+        label = {"enabled": "Бот", "transcribe": "Расшифровка", "answer": "Ответы", "download": "Скачивание",
+                 "daily_summary": "Итоги дня"}[flag]
         await cb.answer(f"{label}: {'включено' if new_value else 'выключено'}")
         if flag == "enabled" and new_value:
             await announce(bot, app, chat_id)
@@ -462,7 +469,9 @@ async def announce(bot: Bot, app: App, chat_id: int) -> None:
     if row.transcribe:
         parts.append("🎙 расшифровываю голосовые и кружки")
     if row.download:
-        parts.append("📥 скачиваю видео по ссылкам (Instagram Reels, X, VK, Facebook, Pinterest…)")
+        parts.append("📥 скачиваю видео и фото по ссылкам (Instagram, X, VK, Facebook, Pinterest…)")
+    if row.answer:
+        parts.append("🗞 /summary — итоги чата за сутки")
     if row.answer:
         parts.append(f"💬 отвечаю на вопросы — упомяните @{esc(app.me.username or '')}, ответьте на моё сообщение или напишите /ask")
     if not parts:

@@ -45,6 +45,7 @@ class App:
     sem: asyncio.Semaphore
     limiter: RateLimiter = field(default_factory=lambda: RateLimiter(limit=8, window=60))
     dl_sem: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(2))
+    summary_last: dict[int, float] = field(default_factory=dict)
     _media_locks: dict[tuple[int, int], asyncio.Lock] = field(default_factory=dict)
     _last_alert: dict[str, float] = field(default_factory=dict)
 

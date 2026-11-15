@@ -7,7 +7,7 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
-from . import admin, chat, members
+from . import admin, chat, members, summary
 from .app import App
 from .config import Config
 from .db import Database
@@ -49,7 +49,11 @@ async def main() -> None:
         await admin.setup_commands(bot, app)
         await admin.check_chats_on_start(bot, app)
         await bot.delete_webhook(drop_pending_updates=False)
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        scheduler = asyncio.create_task(summary.scheduler(bot, app))
+        try:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        finally:
+            scheduler.cancel()
     finally:
         await xai.close()
         await stt.close()

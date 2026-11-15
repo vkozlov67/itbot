@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS chats (
     transcribe INTEGER NOT NULL DEFAULT 1,
     answer     INTEGER NOT NULL DEFAULT 1,
     download   INTEGER NOT NULL DEFAULT 1,
+    daily_summary INTEGER NOT NULL DEFAULT 0,
     added_by   INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -50,8 +51,9 @@ CREATE TABLE IF NOT EXISTS usage (
 """
 
 ACTIVE_STATUSES = ("creator", "administrator", "member", "restricted")
-CHAT_FLAGS = ("enabled", "transcribe", "answer", "download")
-HISTORY_KEEP = 300
+CHAT_FLAGS = ("enabled", "transcribe", "answer", "download", "daily_summary")
+HISTORY_KEEP = 5000  # per chat, hard cap
+HISTORY_DAYS = 3  # enough for daily summaries in busy chats
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ class ChatRow:
     transcribe: bool
     answer: bool
     download: bool
+    daily_summary: bool
     added_by: int | None
 
     @property
@@ -113,8 +116,9 @@ class Database:
 
     def _migrate(self) -> None:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(chats)")}
-        if "download" not in cols:
-            self._conn.execute("ALTER TABLE chats ADD COLUMN download INTEGER NOT NULL DEFAULT 1")
+        for col, default in (("download", 1), ("daily_summary", 0)):
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE chats ADD COLUMN {col} INTEGER NOT NULL DEFAULT {default}")
 
     def close(self) -> None:
         self._conn.close()
@@ -149,6 +153,7 @@ class Database:
             transcribe=bool(row["transcribe"]),
             answer=bool(row["answer"]),
             download=bool(row["download"]),
+            daily_summary=bool(row["daily_summary"]),
             added_by=row["added_by"],
         )
 
@@ -217,8 +222,9 @@ class Database:
                 self._conn.execute("UPDATE chats SET chat_id=? WHERE chat_id=?", (new_id, old_id))
             else:
                 self._conn.execute(
-                    "UPDATE chats SET enabled=?, transcribe=?, answer=?, download=? WHERE chat_id=?",
-                    (int(old.enabled), int(old.transcribe), int(old.answer), int(old.download), new_id),
+                    "UPDATE chats SET enabled=?, transcribe=?, answer=?, download=?, daily_summary=? WHERE chat_id=?",
+                    (int(old.enabled), int(old.transcribe), int(old.answer), int(old.download),
+                     int(old.daily_summary), new_id),
                 )
                 self._conn.execute("DELETE FROM chats WHERE chat_id=?", (old_id,))
             self._conn.execute("UPDATE OR IGNORE messages SET chat_id=? WHERE chat_id=?", (new_id, old_id))
@@ -246,6 +252,10 @@ class Database:
 
     def _prune(self, chat_id: int) -> None:
         self._conn.execute(
+            "DELETE FROM messages WHERE chat_id=? AND date < ?",
+            (chat_id, int(time.time()) - HISTORY_DAYS * 86400),
+        )
+        self._conn.execute(
             "DELETE FROM messages WHERE chat_id=? AND message_id < ("
             "  SELECT COALESCE(MIN(message_id), 0) FROM ("
             "    SELECT message_id FROM messages WHERE chat_id=? ORDER BY message_id DESC LIMIT ?"
@@ -270,6 +280,13 @@ class Database:
                 "SELECT * FROM messages WHERE chat_id=? AND message_id<? ORDER BY message_id DESC LIMIT ?",
                 (chat_id, before_message_id, limit),
             ).fetchall()
+        return [StoredMessage(**dict(r)) for r in reversed(rows)]
+
+    def messages_since(self, chat_id: int, since_ts: int, limit: int = HISTORY_KEEP) -> list[StoredMessage]:
+        rows = self._conn.execute(
+            "SELECT * FROM messages WHERE chat_id=? AND date>=? ORDER BY message_id DESC LIMIT ?",
+            (chat_id, since_ts, limit),
+        ).fetchall()
         return [StoredMessage(**dict(r)) for r in reversed(rows)]
 
     def count_messages(self, chat_id: int) -> int:

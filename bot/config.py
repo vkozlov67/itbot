@@ -44,6 +44,7 @@ class Config:
     openai_base_url: str
     data_dir: Path
     timezone: str
+    summary_time: str
     context_messages: int
     max_parallel_requests: int
 
@@ -76,6 +77,7 @@ class Config:
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "").strip() or "https://api.openai.com/v1",
             data_dir=data_dir,
             timezone=os.environ.get("TIMEZONE", "").strip() or "UTC",
+            summary_time=os.environ.get("SUMMARY_TIME", "").strip() or "21:00",
             context_messages=_int("CONTEXT_MESSAGES", 40),
             max_parallel_requests=_int("MAX_PARALLEL_REQUESTS", 4),
         )

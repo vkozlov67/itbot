@@ -74,8 +74,11 @@ class FakeXAI:
         self.transcribed.append((audio, filename, mime))
         return Transcript(text="Встречаемся завтра в 10 утра у офиса", language="ru")
 
+    last_search = None
+
     async def respond(self, model, items, search=True, max_turns=5):
         self.chats.append((model, items))
+        self.last_search = search
         return self.next_result
 
     next_result = ChatResult(text="**Завтра в 10:00** у офиса.", input_tokens=50, output_tokens=10)
@@ -95,7 +98,7 @@ def env(tmp_path: Path):
     cfg = Config(bot_token="1:x", xai_api_key="k", openai_api_key="o", owner_id=None, claim_code="secret123",
                  chat_model="grok-4.3", stt_model="gpt-transcribe", stt_language="",
                  xai_base_url="https://api.x.ai/v1", openai_base_url="https://api.openai.com/v1",
-                 data_dir=tmp_path, timezone="UTC", context_messages=40, max_parallel_requests=2)
+                 data_dir=tmp_path, timezone="UTC", summary_time="21:00", context_messages=40, max_parallel_requests=2)
     session = FakeSession()
     bot = Bot("42:TEST", session=session)
     xai = FakeXAI()
@@ -173,7 +176,7 @@ def test_full_flow(env):
         assert xai.transcribed and xai.transcribed[0][1:] == ("voice.ogg", "audio/ogg")
         sent = session.sent()
         assert len(sent) == 1 and sent[0].text == (
-            "🎙 <b>Расшифровка</b> · 4 с\n<blockquote expandable>Встречаемся завтра в 10 утра у офиса</blockquote>")
+            "<blockquote expandable>Встречаемся завтра в 10 утра у офиса</blockquote>")
         assert sent[0].reply_parameters.message_id == 50
 
         # 4. question with mention -> answer uses the transcript from history, markdown rendered
@@ -344,5 +347,68 @@ def test_reply_mention_search_and_link_download(env, monkeypatch, tmp_path):
         await dp.feed_update(bot, upd(message=Message(message_id=74, date=NOW, chat=GROUP, from_user=STRANGER, text=url,
                                                       entities=[MessageEntity(type="url", offset=0, length=len(url))])))
         assert len(downloaded) == 1
+
+    run(scenario())
+
+
+def test_summary_command_trigger_and_daily(env):
+    import dataclasses
+    from datetime import datetime, timezone as tz
+    from bot import summary
+
+    bot, dp, app, session, xai = env
+
+    async def scenario():
+        app.db.set_setting("owner_id", str(OWNER.id))
+        await dp.feed_update(bot, added(GROUP, OWNER, admin_member()))
+        mid = 100
+        for who, text in [(STRANGER, "Пятница — идём в бар?"), (OWNER, "Да, в 19:00"), (STRANGER, "Беру Васю"),
+                          (OWNER, "Ок, бронь на 4"), (STRANGER, "Ссылка: https://bar.example")]:
+            mid += 1
+            await dp.feed_update(bot, upd(message=Message(message_id=mid, date=datetime.now(tz.utc), chat=GROUP,
+                                                          from_user=who, text=text)))
+        xai.next_result = ChatResult(text="**🗞 Итоги дня**\n- Бар в пятницу в 19:00, бронь на 4", input_tokens=500,
+                                     output_tokens=40)
+
+        # /summary -> reply with summary, no web search, history included
+        session.calls.clear()
+        cmd = Message(message_id=200, date=datetime.now(tz.utc), chat=GROUP, from_user=STRANGER, text="/summary",
+                      entities=[MessageEntity(type="bot_command", offset=0, length=8)])
+        await dp.feed_update(bot, upd(message=cmd))
+        assert xai.last_search is False
+        prompt, user = xai.chats[-1][1][0]["content"], xai.chats[-1][1][1]["content"]
+        assert "саммари" in prompt and "женском роде" in prompt and "Беру Васю" in user and "бронь на 4" in user
+        out = session.sent()[-1]
+        assert out.reply_parameters.message_id == 200 and "<b>🗞 Итоги дня</b>" in out.text
+
+        # a second request from a non-owner within the cooldown is refused politely
+        n = len(xai.chats)
+        await dp.feed_update(bot, upd(message=cmd.model_copy(update={"message_id": 201})))
+        assert len(xai.chats) == n and "недавно" in session.sent()[-1].text
+
+        # natural language trigger from the owner, with hours
+        q = "@it_test_bot что было в чате за 6 часов?"
+        await dp.feed_update(bot, upd(message=Message(message_id=202, date=datetime.now(tz.utc), chat=GROUP,
+                                                      from_user=OWNER, text=q,
+                                                      entities=[MessageEntity(type="mention", offset=0, length=12)])))
+        assert len(xai.chats) == n + 1 and "последние 6 ч" in xai.chats[-1][1][1]["content"]
+
+        # an ordinary question is not a summary
+        await dp.feed_update(bot, upd(message=Message(message_id=203, date=datetime.now(tz.utc), chat=GROUP,
+                                                      from_user=OWNER, text="@it_test_bot сколько будет 2+2",
+                                                      entities=[MessageEntity(type="mention", offset=0, length=12)])))
+        assert xai.last_search is True
+
+        # daily summary: off by default; when on, posted once inside the window
+        now = datetime.now(tz.utc)
+        app.cfg = dataclasses.replace(app.cfg, summary_time=now.strftime("%H:%M"))
+        session.calls.clear()
+        await summary.daily_tick(bot, app)
+        assert session.sent() == []
+        app.db.set_flag(GROUP.id, "daily_summary", True)
+        await summary.daily_tick(bot, app)
+        await summary.daily_tick(bot, app)
+        posted = [m for m in session.sent() if m.chat_id == GROUP.id]
+        assert len(posted) == 1 and posted[0].reply_parameters is None
 
     run(scenario())

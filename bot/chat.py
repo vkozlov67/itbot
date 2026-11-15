@@ -19,7 +19,7 @@ from aiogram.utils.chat_action import ChatActionSender
 from .admin import chat_actions_markup
 from .app import App, send_reply, thread_id
 from .db import StoredMessage
-from .textutil import esc, fmt_duration, md_to_html, split_text
+from .textutil import esc, md_to_html, split_text
 from .apis import APIError, ChatResult, to_chat_messages
 from .downloader import Download, DownloadError, Link, download, find_links
 
@@ -177,18 +177,11 @@ async def get_transcript(bot: Bot, app: App, msg: Message) -> tuple[str, float]:
         return text, duration
 
 
-def transcript_messages(text: str, duration: float) -> list[str]:
+def transcript_messages(text: str, duration: float = 0) -> list[str]:
+    """Just the text, as a collapsible quote (split if it exceeds one Telegram message)."""
     if text.startswith(NO_SPEECH):
-        return ["🎙 <i>Речь не распознана</i>"]
-    # Always a collapsible quote, so long transcripts don't flood the chat.
-    chunks = split_text(text, 3500)
-    out = []
-    for i, chunk in enumerate(chunks):
-        head = "🎙 <b>Расшифровка</b>" + (f" · {fmt_duration(duration)}" if duration and i == 0 else "")
-        if len(chunks) > 1:
-            head += f" ({i + 1}/{len(chunks)})"
-        out.append(f"{head}\n<blockquote expandable>{esc(chunk)}</blockquote>")
-    return out
+        return ["<blockquote><i>речь не распознана</i></blockquote>"]
+    return [f"<blockquote expandable>{esc(chunk)}</blockquote>" for chunk in split_text(text, 3500)]
 
 
 async def transcribe_and_reply(bot: Bot, app: App, message: Message) -> str | None:
@@ -253,13 +246,13 @@ def _sources_md(result: ChatResult, limit: int = 5) -> str:
     return "\n\n🔎 " + " · ".join(links)
 
 
-def _history_block(app: App, history: list[StoredMessage]) -> str:
+def _history_block(app: App, history: list[StoredMessage], budget: int = HISTORY_CHAR_BUDGET) -> str:
     tz = _tz(app)
     lines: list[str] = []
     used = 0
     for m in reversed(history):
         text = m.text.lstrip(MARK)
-        if m.kind == "bot":
+        if m.kind in ("bot", "summary"):
             author = "Ты"
         else:
             author = m.author
@@ -272,7 +265,7 @@ def _history_block(app: App, history: list[StoredMessage]) -> str:
             body = body[:1500] + "…"
         ts = datetime.fromtimestamp(m.date, tz).strftime("%d.%m %H:%M")
         line = f"[{ts}] {author}: {body}"
-        if used + len(line) > HISTORY_CHAR_BUDGET:
+        if used + len(line) > budget:
             break
         used += len(line)
         lines.append(line)
@@ -510,6 +503,13 @@ async def handle(bot: Bot, app: App, message: Message, *, place: str, private: b
 
     if from_bot or not answer_on or kind == "sticker":
         return
+    if not private:
+        from .summary import reply_summary, requested_hours  # lazy: summary imports this module
+
+        hours = requested_hours(message, app.me)
+        if hours:
+            await reply_summary(bot, app, message, hours, message.chat.title or "")
+            return
     if private:
         if text.startswith("/") and not text.lower().startswith("/ask"):
             await send_reply(bot, message, "Команды: /panel — панель управления, /reset — очистить память диалога.")
