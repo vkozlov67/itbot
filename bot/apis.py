@@ -1,4 +1,5 @@
-"""HTTP clients: xAI (Grok) for answers, pictures and videos; OpenAI for speech-to-text and text-to-speech."""
+"""HTTP clients: xAI (Grok) for answers, pictures and videos; OpenAI for speech-to-text and text-to-speech;
+ElevenLabs for text-to-speech (optional)."""
 from __future__ import annotations
 
 import asyncio
@@ -75,6 +76,11 @@ def _error_message(resp: httpx.Response) -> str:
     except ValueError:
         return resp.text[:300] or resp.reason_phrase
     if isinstance(data, dict):
+        detail = data.get("detail")  # ElevenLabs: {"detail": {"status": "quota_exceeded", "message": "..."}}
+        if isinstance(detail, dict):
+            return " ".join(str(detail.get(k)) for k in ("status", "message") if detail.get(k))[:300] or str(detail)[:300]
+        if isinstance(detail, str):
+            return detail[:300]
         err = data.get("error")
         if isinstance(err, dict):
             return str(err.get("message") or err)[:300]
@@ -91,9 +97,13 @@ class _JsonAPI:
     def __init__(self, api_key: str, base_url: str):
         self._http = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers=self._auth(api_key),
             timeout=httpx.Timeout(300.0, connect=20.0),
         )
+
+    @staticmethod
+    def _auth(api_key: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {api_key}"}
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -311,3 +321,49 @@ class OpenAITranscriber(_JsonAPI):
         payload = await self._request("GET", "/models", attempts=2)
         items = payload.get("data", []) if isinstance(payload, dict) else []
         return [str(m.get("id")) for m in items if isinstance(m, dict) and m.get("id")]
+
+
+class ElevenLabsTTS(_JsonAPI):
+    """ElevenLabs /v1/text-to-speech. Returns MP3; the caller converts it to OGG/Opus for Telegram."""
+
+    provider = "ElevenLabs"
+    VOICE_KEY = "elevenlabs_voice"
+
+    def __init__(self, api_key: str, *, model: str, voice_id: str = "",
+                 base_url: str = "https://api.elevenlabs.io"):
+        super().__init__(api_key, base_url)
+        self.model = model
+        self.voice_id = voice_id
+        self.voice_name = ""
+
+    @staticmethod
+    def _auth(api_key: str) -> dict[str, str]:
+        return {"xi-api-key": api_key}
+
+    async def list_voices(self) -> list[dict[str, Any]]:
+        payload = await self._request("GET", "/v2/voices", params={"page_size": 100}, attempts=2)
+        voices = payload.get("voices", []) if isinstance(payload, dict) else []
+        return [v for v in voices if isinstance(v, dict) and v.get("voice_id")]
+
+    async def pick_voice(self) -> str:
+        """The configured voice, else the account's first female voice (own/saved voices before premade ones)."""
+        if self.voice_id:
+            return self.voice_id
+        voices = await self.list_voices()
+        female = [v for v in voices if str((v.get("labels") or {}).get("gender", "")).lower() == "female"]
+        pool = sorted(female or voices, key=lambda v: v.get("category") == "premade")
+        if not pool:
+            raise APIError(self.provider, None, "в аккаунте нет голосов — задайте ELEVENLABS_VOICE_ID")
+        self.voice_id, self.voice_name = str(pool[0]["voice_id"]), str(pool[0].get("name") or "")
+        log.info("ElevenLabs voice picked automatically: %s (%s)", self.voice_name, self.voice_id)
+        return self.voice_id
+
+    async def speech(self, text: str) -> bytes:
+        voice = await self.pick_voice()
+        audio = await self._request(
+            "POST", f"/v1/text-to-speech/{voice}", params={"output_format": "mp3_44100_128"},
+            json={"text": text, "model_id": self.model}, raw=True,
+        )
+        if not audio:
+            raise APIError(self.provider, None, "пустой звук")
+        return audio

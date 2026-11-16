@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS chats (
     daily_summary INTEGER NOT NULL DEFAULT 0,
     delete_links INTEGER NOT NULL DEFAULT 1,
     weekly_summary INTEGER NOT NULL DEFAULT 0,
+    voice_replies INTEGER NOT NULL DEFAULT 1,
     added_by   INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -56,7 +57,8 @@ CREATE TABLE IF NOT EXISTS usage (
 """
 
 ACTIVE_STATUSES = ("creator", "administrator", "member", "restricted")
-CHAT_FLAGS = ("enabled", "transcribe", "answer", "download", "daily_summary", "delete_links", "weekly_summary")
+CHAT_FLAGS = ("enabled", "transcribe", "answer", "download", "daily_summary", "delete_links", "weekly_summary",
+              "voice_replies")
 HISTORY_KEEP = 20000  # per chat, hard cap
 HISTORY_DAYS = 8  # enough for weekly summaries and stats
 
@@ -76,6 +78,7 @@ class ChatRow:
     added_by: int | None
     delete_links: bool = True
     weekly_summary: bool = False
+    voice_replies: bool = True
 
     @property
     def active(self) -> bool:
@@ -126,7 +129,8 @@ class Database:
 
     def _migrate(self) -> None:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(chats)")}
-        for col, default in (("download", 1), ("daily_summary", 0), ("delete_links", 1), ("weekly_summary", 0)):
+        for col, default in (("download", 1), ("daily_summary", 0), ("delete_links", 1), ("weekly_summary", 0),
+                             ("voice_replies", 1)):
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE chats ADD COLUMN {col} INTEGER NOT NULL DEFAULT {default}")
         usage_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(usage)")}
@@ -170,6 +174,7 @@ class Database:
             daily_summary=bool(row["daily_summary"]),
             delete_links=bool(row["delete_links"]),
             weekly_summary=bool(row["weekly_summary"]),
+            voice_replies=bool(row["voice_replies"]),
             added_by=row["added_by"],
         )
 
@@ -239,9 +244,10 @@ class Database:
             else:
                 self._conn.execute(
                     "UPDATE chats SET enabled=?, transcribe=?, answer=?, download=?, daily_summary=?, delete_links=?, "
-                    "weekly_summary=? WHERE chat_id=?",
+                    "weekly_summary=?, voice_replies=? WHERE chat_id=?",
                     (int(old.enabled), int(old.transcribe), int(old.answer), int(old.download),
-                     int(old.daily_summary), int(old.delete_links), int(old.weekly_summary), new_id),
+                     int(old.daily_summary), int(old.delete_links), int(old.weekly_summary),
+                     int(old.voice_replies), new_id),
                 )
                 self._conn.execute("DELETE FROM chats WHERE chat_id=?", (old_id,))
             self._conn.execute("UPDATE OR IGNORE messages SET chat_id=? WHERE chat_id=?", (new_id, old_id))

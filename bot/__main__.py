@@ -14,7 +14,7 @@ from . import admin, chat, members, summary
 from .app import App
 from .config import Config
 from .db import Database
-from .apis import OpenAITranscriber, XAIClient
+from .apis import ElevenLabsTTS, OpenAITranscriber, XAIClient
 
 log = logging.getLogger("itbot")
 
@@ -56,12 +56,16 @@ async def main() -> None:
     db = Database(cfg.data_dir / "itbot.sqlite3")
     xai = XAIClient(cfg.xai_api_key, cfg.xai_base_url)
     stt = OpenAITranscriber(cfg.openai_api_key, cfg.openai_base_url, cfg.stt_model)
+    tts = (ElevenLabsTTS(cfg.elevenlabs_api_key, model=cfg.elevenlabs_model, voice_id=cfg.elevenlabs_voice_id)
+           if cfg.elevenlabs_api_key else None)
     bot = create_bot(cfg.bot_token)
     try:
         me = await bot.get_me()
-        app = App(cfg=cfg, db=db, xai=xai, stt=stt, me=me, sem=asyncio.Semaphore(cfg.max_parallel_requests))
-        log.info("started as @%s (id %s), chat model %s, stt model %s, group privacy %s",
+        app = App(cfg=cfg, db=db, xai=xai, stt=stt, me=me, sem=asyncio.Semaphore(cfg.max_parallel_requests),
+                  tts=tts)
+        log.info("started as @%s (id %s), chat model %s, stt model %s, tts %s, group privacy %s",
                  me.username, me.id, app.chat_model(), cfg.stt_model,
+                 f"ElevenLabs {cfg.elevenlabs_model}" if tts else f"OpenAI {cfg.tts_model}",
                  "off" if me.can_read_all_group_messages else "ON (non-admin groups see only commands/replies)")
         if app.owner_id is None:
             log.warning("OWNER NOT SET. Open this link in Telegram to become the owner: %s", app.claim_link())
@@ -80,6 +84,8 @@ async def main() -> None:
     finally:
         await xai.close()
         await stt.close()
+        if tts:
+            await tts.close()
         await bot.session.close()
         db.close()
 

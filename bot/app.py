@@ -13,7 +13,7 @@ from aiogram.types import InlineKeyboardMarkup, Message, ReplyParameters, User
 
 from .config import Config
 from .db import Database
-from .apis import OpenAITranscriber, XAIClient
+from .apis import ElevenLabsTTS, OpenAITranscriber, XAIClient
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ class App:
     dl_sem: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(2))
     summary_last: dict[int, float] = field(default_factory=dict)
     video_sem: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(2))  # videos take minutes
+    tts: ElevenLabsTTS | None = None  # None = OpenAI TTS only
     _media_locks: dict[tuple[int, int], asyncio.Lock] = field(default_factory=dict)
     _last_alert: dict[str, float] = field(default_factory=dict)
 

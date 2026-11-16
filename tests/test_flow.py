@@ -683,3 +683,73 @@ def test_vision_voice_video_stats_weekly(env):
 
     draw_mod._video_log.clear()
     run(scenario())
+
+
+class FakeEleven:
+    voice_id, voice_name = "", ""
+
+    def __init__(self):
+        self.spoken = []
+        self.error = None
+
+    async def speech(self, text):
+        self.spoken.append(text)
+        if self.error is not None:
+            raise self.error
+        return b"ID3fake-mp3"
+
+
+def test_voice_question_gets_voice_answer(env, monkeypatch):
+    from bot import voice as voice_mod
+    from bot.apis import APIError
+
+    bot, dp, app, session, xai = env
+    eleven = FakeEleven()
+    app.tts = eleven
+    converted = []
+
+    async def fake_ogg(audio):
+        converted.append(audio)
+        return b"OggS-from-mp3"
+
+    monkeypatch.setattr(voice_mod, "to_ogg_opus", fake_ogg)
+    v = Voice(file_id="VQ", file_unique_id="vq", duration=3, mime_type="audio/ogg", file_size=500)
+    mine = Message(message_id=400, date=NOW, chat=GROUP, from_user=ME, text="Чем помочь?")
+
+    def voice_reply(mid):
+        return upd(message=Message(message_id=mid, date=NOW, chat=GROUP, from_user=STRANGER, voice=v,
+                                   reply_to_message=mine))
+
+    async def scenario():
+        app.db.set_setting("owner_id", str(OWNER.id))
+        await dp.feed_update(bot, added(GROUP, OWNER, admin_member()))
+        assert app.db.get_chat(GROUP.id).voice_replies  # on by default
+
+        # 1. voice in reply to the bot -> transcript, then a voice answer via ElevenLabs (MP3 -> OGG)
+        session.calls.clear()
+        xai.next_result = ChatResult(text="Да, **в 10** у офиса.", input_tokens=5, output_tokens=5)
+        await dp.feed_update(bot, voice_reply(401))
+        voices = [c for c in session.calls if isinstance(c, SendVoice)]
+        assert len(voices) == 1 and voices[0].reply_parameters.message_id == 401
+        assert "<b>в 10</b>" in voices[0].caption
+        assert eleven.spoken == ["Да, в 10 у офиса."] and converted == [b"ID3fake-mp3"]
+        assert not xai.spoken  # OpenAI TTS not used
+        assert "озвучен" in xai.chats[-1][1][0]["content"]
+        assert len(session.sent()) == 1  # only the transcript as text
+
+        # 2. ElevenLabs fails -> OpenAI voice instead, owner warned about the key
+        eleven.error = APIError("ElevenLabs", 401, "invalid_api_key")
+        session.calls.clear()
+        await dp.feed_update(bot, voice_reply(402))
+        assert len([c for c in session.calls if isinstance(c, SendVoice)]) == 1 and xai.spoken
+        assert any("ElevenLabs" in (m.text or "") and m.chat_id == OWNER.id for m in session.sent())
+        eleven.error = None
+
+        # 3. the panel switch turns it off -> plain text answer
+        app.db.set_flag(GROUP.id, "voice_replies", False)
+        session.calls.clear()
+        await dp.feed_update(bot, voice_reply(403))
+        assert not [c for c in session.calls if isinstance(c, SendVoice)]
+        assert any("в 10" in (m.text or "") for m in session.sent())
+
+    run(scenario())

@@ -1,6 +1,10 @@
-"""Spoken replies (OpenAI TTS): "@bot ответь голосом …" and "@bot озвучь" in reply to a message."""
+"""Spoken replies: "@bot ответь голосом …", voice answers to voice questions, "@bot озвучь" in reply to a message.
+
+ElevenLabs when ELEVENLABS_API_KEY is set (MP3 converted to OGG/Opus with ffmpeg), otherwise — or if it fails —
+OpenAI TTS."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -38,6 +42,39 @@ READ_RE = re.compile(
 )
 
 
+async def to_ogg_opus(audio: bytes) -> bytes | None:
+    """Any audio -> OGG/Opus (what Telegram plays as a voice message); None if ffmpeg failed."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-vn", "-ac", "1", "-c:a", "libopus", "-b:a", "48k",
+            "-application", "voip", "-f", "ogg", "pipe:1",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(audio), timeout=60)
+    except (OSError, asyncio.TimeoutError) as exc:
+        log.error("ffmpeg opus conversion failed: %r", exc)
+        return None
+    if proc.returncode != 0 or not out.startswith(b"OggS"):
+        log.error("ffmpeg opus conversion failed (%s): %s", proc.returncode, err[:300])
+        return None
+    return out
+
+
+async def synthesize(bot: Bot, app: App, text: str) -> bytes:
+    """OGG/Opus speech: ElevenLabs first (if configured), OpenAI as the fallback. Raises APIError if both fail."""
+    if app.tts is not None:
+        try:
+            ogg = await to_ogg_opus(await app.tts.speech(text))
+            if ogg:
+                return ogg
+        except APIError as exc:
+            log.error("ElevenLabs tts failed, falling back to OpenAI: %s", exc)
+            alert = _alert_if_account_problem(bot, app, exc)
+            if alert:
+                await alert
+    return await app.stt.speech(text, model=app.cfg.tts_model, voice=app.cfg.tts_voice, instructions=INSTRUCTIONS)
+
+
 def wants_voice(question: str) -> bool:
     return bool(VOICE_RE.search(question.strip()))
 
@@ -66,8 +103,7 @@ async def speak(bot: Bot, app: App, message: Message, text: str, *, extra_md: st
     chat_id = message.chat.id
     try:
         async with ChatActionSender.record_voice(bot=bot, chat_id=chat_id, message_thread_id=thread_id(message)):
-            audio = await app.stt.speech(spoken, model=app.cfg.tts_model, voice=app.cfg.tts_voice,
-                                         instructions=INSTRUCTIONS)
+            audio = await synthesize(bot, app, spoken)
     except APIError as exc:
         log.error("tts failed in %s: %s", chat_id, exc)
         alert = _alert_if_account_problem(bot, app, exc)

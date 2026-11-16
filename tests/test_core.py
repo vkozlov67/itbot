@@ -505,3 +505,42 @@ def test_stats_requests_and_build(tmp_path):
     assert "🎙 голосовых: 2" in text and "📷 фото: 1" in text and "Скачала по ссылкам: 1" in text
     assert "ответила на 3 вопр." in text and "нарисовала 1" in text
     assert summary.build_stats(app, -1, 7) is None
+
+
+def test_elevenlabs_client_picks_voice_and_parses_errors():
+    import asyncio
+    import httpx
+    from bot.apis import APIError, ElevenLabsTTS
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("xi-api-key")))
+        if request.url.path == "/v2/voices":
+            return httpx.Response(200, json={"voices": [
+                {"voice_id": "m1", "name": "Bob", "category": "premade", "labels": {"gender": "male"}},
+                {"voice_id": "f1", "name": "Ann", "category": "premade", "labels": {"gender": "female"}},
+                {"voice_id": "f2", "name": "Mine", "category": "cloned", "labels": {"gender": "female"}},
+            ]})
+        if request.url.path == "/v1/text-to-speech/f2":
+            assert request.url.params["output_format"] == "mp3_44100_128"
+            return httpx.Response(200, content=b"ID3mp3")
+        return httpx.Response(401, json={"detail": {"status": "quota_exceeded", "message": "no credits left"}})
+
+    async def go():
+        c = ElevenLabsTTS("KEY", model="eleven_multilingual_v2")
+        c._http = httpx.AsyncClient(base_url="https://api.elevenlabs.io", headers={"xi-api-key": "KEY"},
+                                    transport=httpx.MockTransport(handler))
+        assert await c.speech("привет") == b"ID3mp3"
+        assert (c.voice_id, c.voice_name) == ("f2", "Mine")  # own female voice before premade ones
+        assert all(k == "KEY" for _, _, k in seen)
+        c.voice_id = "bad"
+        try:
+            await c.speech("привет")
+        except APIError as exc:
+            assert exc.account_problem and "quota_exceeded no credits left" in str(exc)
+        else:
+            raise AssertionError("expected APIError")
+        await c.close()
+
+    asyncio.run(go())

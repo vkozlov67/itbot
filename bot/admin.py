@@ -37,7 +37,8 @@ class Panel(CallbackData, prefix="p"):
 
 
 FLAG_LABELS = {"enabled": "Бот", "transcribe": "Расшифровка", "answer": "Ответы", "download": "Скачивание",
-               "daily_summary": "Итоги дня", "delete_links": "Удаление ссылок", "weekly_summary": "Итоги недели"}
+               "daily_summary": "Итоги дня", "delete_links": "Удаление ссылок", "weekly_summary": "Итоги недели",
+               "voice_replies": "Голосом на голосовые"}
 WEEKDAYS_ON = ("по понедельникам", "по вторникам", "по средам", "по четвергам", "по пятницам", "по субботам",
                "по воскресеньям")
 
@@ -94,7 +95,11 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         f"Расшифровка (OpenAI): <code>{esc(app.cfg.stt_model)}</code>",
         f"Картинки и видео (Grok Imagine): <code>{esc(app.cfg.image_model)}</code>, "
         f"<code>{esc(app.cfg.video_model)}</code>",
-        f"Голос (OpenAI): <code>{esc(app.cfg.tts_model)}</code>, голос <code>{esc(app.cfg.tts_voice)}</code>",
+        (f"Голос (ElevenLabs): <code>{esc(app.cfg.elevenlabs_model)}</code>, голос "
+         f"<code>{esc(app.tts.voice_name or app.tts.voice_id or 'выберется автоматически')}</code>; "
+         f"запасной — OpenAI <code>{esc(app.cfg.tts_voice)}</code>"
+         if app.tts else
+         f"Голос (OpenAI): <code>{esc(app.cfg.tts_model)}</code>, голос <code>{esc(app.cfg.tts_voice)}</code>"),
         "Режим приватности бота: "
         + ("выключен ✅ (видит все сообщения в группах)" if app.me.can_read_all_group_messages
            else "включён — в группах, где бот не админ, он видит только /ask и ответы на свои сообщения"),
@@ -229,6 +234,7 @@ async def chat_view(bot: Bot, app: App, chat_id: int) -> tuple[str, InlineKeyboa
         [flip(f"🗞 Итоги дня в {app.cfg.summary_time}: {'вкл' if row.daily_summary else 'выкл'}", "daily_summary")],
         [flip(f"📅 Итоги недели {WEEKDAYS_ON[app.cfg.weekly_day]}: {'вкл' if row.weekly_summary else 'выкл'}",
               "weekly_summary")],
+        [flip(f"🗣 Отвечать голосом на голосовые: {'вкл' if row.voice_replies else 'выкл'}", "voice_replies")],
         [btn("🧹 Очистить память", a="clr", c=row.chat_id)],
         [btn("🚪 Выйти из чата", a="leave", c=row.chat_id)],
         [btn("« Назад", a="home")],
@@ -516,7 +522,8 @@ async def announce(bot: Bot, app: App, chat_id: int) -> None:
         parts.append("🗞 /summary — итоги чата за сутки, /stats — статистика за неделю")
         parts.append(f"🎨 рисую картинки — «@{u} нарисуй …», а в ответ на фото — «переделай в стиле …»")
         parts.append(f"🎬 оживляю фото — ответьте на фото «@{u} оживи», или «@{u} сними видео …»")
-        parts.append(f"🔊 отвечаю голосом — «@{u} ответь голосом …», а «@{u} озвучь» в ответ на сообщение зачитает его")
+        parts.append(f"🔊 отвечаю голосом — «@{u} ответь голосом …», а «@{u} озвучь» в ответ на сообщение зачитает его"
+                     + ("; на голосовое в ответ мне — отвечу голосовым" if row.voice_replies else ""))
         parts.append("👀 вижу фото и скриншоты — спросите про них, ответив на картинку")
     if row.answer:
         parts.append(f"💬 отвечаю на вопросы — упомяните @{esc(app.me.username or '')}, ответьте на моё сообщение или напишите /ask")

@@ -137,7 +137,7 @@ def _tz(app: App):
 
 def _alert_if_account_problem(bot: Bot, app: App, exc: APIError):
     if exc.account_problem:
-        console = "console.x.ai" if exc.provider == "xAI" else "platform.openai.com"
+        console = {"xAI": "console.x.ai", "ElevenLabs": "elevenlabs.io"}.get(exc.provider, "platform.openai.com")
         return app.notify_owner(
             bot,
             f"⚠️ Проблема с ключом {exc.provider}: <code>{esc(str(exc))}</code>\n"
@@ -319,7 +319,9 @@ def _history_block(app: App, history: list[StoredMessage], budget: int = HISTORY
     return "\n".join(reversed(lines))
 
 
-async def answer(bot: Bot, app: App, message: Message, question: str, *, place: str) -> None:
+async def answer(bot: Bot, app: App, message: Message, question: str, *, place: str,
+                 voice_reply: bool = False) -> None:
+    """Answer with Grok. `voice_reply`: the question was a voice message, so answer with a voice message too."""
     chat_id = message.chat.id
     user = message.from_user
     log.info("question in %s from %s: %.80r", chat_id, user.id if user else None, question)
@@ -387,7 +389,7 @@ async def answer(bot: Bot, app: App, message: Message, question: str, *, place: 
                                       username=app.me.username or "бот")
         from .voice import VOICE_PROMPT, speak, wants_voice  # lazy: voice imports this module
 
-        voice = wants_voice(question)
+        voice = voice_reply or wants_voice(question)
         if voice:
             system += VOICE_PROMPT
 
@@ -623,7 +625,8 @@ def _without_links(message: Message) -> str:
 
 # ---------------------------------------------------------------- dispatch
 async def handle(bot: Bot, app: App, message: Message, *, place: str, private: bool,
-                 transcribe: bool, answer_on: bool, download_on: bool, replace_links: bool = False) -> None:
+                 transcribe: bool, answer_on: bool, download_on: bool, replace_links: bool = False,
+                 voice_replies: bool = True) -> None:
     chat_id = message.chat.id
     kind = kind_of(message)
     text = message.text or message.caption or ""
@@ -639,7 +642,7 @@ async def handle(bot: Bot, app: App, message: Message, *, place: str, private: b
                 (private and message.forward_origin is None) or (not private and _is_reply_to_me(message, app.me))
             )
             if transcript and not transcript.startswith(NO_SPEECH) and answer_on and (spoken_question or question):
-                await answer(bot, app, message, question or transcript, place=place)
+                await answer(bot, app, message, question or transcript, place=place, voice_reply=voice_replies)
         elif not app.db.get_message(chat_id, message.message_id):
             app.db.add_message(chat_id, message.message_id, sender.id if sender else None,
                                author_of(message), kind, text, date)
@@ -717,7 +720,7 @@ async def on_group_message(message: Message, bot: Bot, app: App) -> None:
         return
     await handle(bot, app, message, place=f"групповой чат «{row.title}»", private=False,
                  transcribe=row.transcribe, answer_on=row.answer, download_on=row.download,
-                 replace_links=row.delete_links)
+                 replace_links=row.delete_links, voice_replies=row.voice_replies)
 
 
 @router.message(F.chat.type == "private")

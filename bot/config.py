@@ -52,6 +52,9 @@ class Config:
     tts_model: str = "gpt-4o-mini-tts"
     tts_voice: str = "marin"
     weekly_day: int = 6  # 0 = Monday … 6 = Sunday
+    elevenlabs_api_key: str = ""  # optional: ElevenLabs voice instead of OpenAI TTS
+    elevenlabs_voice_id: str = ""  # empty = first female voice of the account
+    elevenlabs_model: str = "eleven_multilingual_v2"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -88,6 +91,9 @@ class Config:
             tts_model=os.environ.get("TTS_MODEL", "").strip() or "gpt-4o-mini-tts",
             tts_voice=os.environ.get("TTS_VOICE", "").strip() or "marin",
             weekly_day=max(0, min(6, _int("WEEKLY_DAY", 6))),
+            elevenlabs_api_key=os.environ.get("ELEVENLABS_API_KEY", "").strip(),
+            elevenlabs_voice_id=os.environ.get("ELEVENLABS_VOICE_ID", "").strip(),
+            elevenlabs_model=os.environ.get("ELEVENLABS_MODEL", "").strip() or "eleven_multilingual_v2",
             context_messages=_int("CONTEXT_MESSAGES", 40),
             max_parallel_requests=_int("MAX_PARALLEL_REQUESTS", 4),
         )
