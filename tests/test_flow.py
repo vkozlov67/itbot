@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (
-    AnswerCallbackQuery, DeleteMessage, EditMessageText, GetChat, GetChatMember, GetFile, SendDocument, SendMessage, SendPhoto, SendVideo,
+    AnswerCallbackQuery, DeleteMessage, EditMessageText, GetChat, GetChatMember, GetFile, SendDocument, SendMessage, SendPhoto, SendVideo, SendVoice,
 )
 from aiogram.types import (
     Audio, Document, Video, VideoNote,
@@ -47,7 +47,7 @@ class FakeSession(BaseSession):
         self.calls.append(method)
         if self.fail_answer and isinstance(method, AnswerCallbackQuery):
             raise TelegramBadRequest(method=method, message="Bad Request: query is too old")
-        if isinstance(method, (SendMessage, EditMessageText, SendVideo, SendPhoto, SendDocument)):
+        if isinstance(method, (SendMessage, EditMessageText, SendVideo, SendPhoto, SendDocument, SendVoice)):
             self.n += 1
             chat_id = method.chat_id
             return Message(message_id=self.n, date=NOW, chat=Chat(id=chat_id, type="private" if chat_id > 0 else "supergroup"),
@@ -105,6 +105,20 @@ class FakeXAI:
         if self.image_error is not None:
             raise self.image_error
         return b"\xff\xd8fake-jpeg"
+
+    videos = None
+    spoken = None
+    speech_error = None
+
+    async def video(self, model, prompt, image=None, duration=6, aspect_ratio=None, **kw):
+        self.videos = (self.videos or []) + [(model, prompt, image, duration, aspect_ratio)]
+        return b"\x00\x00\x00\x18ftypmp42fake"
+
+    async def speech(self, text, *, model, voice, instructions=""):
+        self.spoken = (self.spoken or []) + [(text, model, voice)]
+        if self.speech_error is not None:
+            raise self.speech_error
+        return b"OggS-fake-opus"
 
     async def close(self):
         pass
@@ -562,4 +576,110 @@ def test_summary_command_trigger_and_daily(env):
         posted = [m for m in session.sent() if m.chat_id == GROUP.id]
         assert len(posted) == 1 and posted[0].reply_parameters is None
 
+    run(scenario())
+
+
+def test_vision_voice_video_stats_weekly(env):
+    import dataclasses
+    from datetime import datetime, timezone as tz
+    from aiogram.types import PhotoSize, Sticker
+    from bot import summary
+    from bot import draw as draw_mod
+    from bot.apis import APIError
+
+    bot, dp, app, session, xai = env
+
+    def mention(mid, text, user=STRANGER, **kw):
+        return upd(message=Message(message_id=mid, date=datetime.now(tz.utc), chat=GROUP, from_user=user, text=text,
+                                   entities=[MessageEntity(type="mention", offset=0, length=12)], **kw))
+
+    async def scenario():
+        app.db.set_setting("owner_id", str(OWNER.id))
+        await dp.feed_update(bot, added(GROUP, OWNER, admin_member()))
+
+        # 1. vision: a screenshot sent as a PNG file is passed to Grok as an image
+        doc = Message(message_id=300, date=NOW, chat=GROUP, from_user=OWNER,
+                      document=Document(file_id="d1", file_unique_id="ud1", mime_type="image/png", file_size=10))
+        await dp.feed_update(bot, mention(301, "@it_test_bot что тут написано?", reply_to_message=doc))
+        content = xai.chats[-1][1][1]["content"]
+        assert content[1]["image_url"].startswith("data:image/png;base64,")
+        assert "картинка-файл, изображение приложено" in content[0]["text"]
+        assert "скриншот" in xai.chats[-1][1][0]["content"]  # the system prompt knows it can see pictures
+        # a sticker that cannot be converted is described instead of crashing
+        st = Message(message_id=302, date=NOW, chat=GROUP, from_user=OWNER,
+                     sticker=Sticker(file_id="s1", file_unique_id="us1", type="regular", width=512, height=512,
+                                     is_animated=False, is_video=False, file_size=10))
+        await dp.feed_update(bot, mention(303, "@it_test_bot что за стикер?", reply_to_message=st))
+        assert "стикер" in str(xai.chats[-1][1][1]["content"])
+
+        # 2. "ответь голосом" -> voice reply with the text attached, short spoken style requested
+        session.calls.clear()
+        xai.next_result = ChatResult(text="Юрий **Гагарин** — первый человек в космосе.", input_tokens=5, output_tokens=5)
+        await dp.feed_update(bot, mention(310, "@it_test_bot ответь голосом, кто такой Гагарин"))
+        voices = [c for c in session.calls if isinstance(c, SendVoice)]
+        assert len(voices) == 1 and voices[0].reply_parameters.message_id == 310
+        assert "<b>Гагарин</b>" in voices[0].caption and not session.sent()
+        assert xai.spoken[-1][0] == "Юрий Гагарин — первый человек в космосе."
+        assert "озвучен" in xai.chats[-1][1][0]["content"]
+        # TTS failure -> plain text answer
+        xai.speech_error = APIError("OpenAI", 500, "boom")
+        session.calls.clear()
+        await dp.feed_update(bot, mention(311, "@it_test_bot расскажи анекдот голосом"))
+        xai.speech_error = None
+        assert not [c for c in session.calls if isinstance(c, SendVoice)] and session.sent()
+
+        # 3. "озвучь" in reply to a message reads it aloud (no chat-model call, no duplicate text)
+        n = len(xai.chats)
+        src = Message(message_id=320, date=NOW, chat=GROUP, from_user=OWNER, text="Встреча завтра в 10:00")
+        session.calls.clear()
+        await dp.feed_update(bot, mention(321, "@it_test_bot озвучь", reply_to_message=src))
+        voices = [c for c in session.calls if isinstance(c, SendVoice)]
+        assert len(voices) == 1 and voices[0].caption is None and len(xai.chats) == n
+        assert xai.spoken[-1][0] == "Встреча завтра в 10:00"
+
+        # 4. "оживи" on a photo -> video from the photo, wait note removed, usage counted
+        pic = Message(message_id=330, date=NOW, chat=GROUP, from_user=OWNER,
+                      photo=[PhotoSize(file_id="p1", file_unique_id="u1", width=800, height=600, file_size=10)])
+        session.calls.clear()
+        await dp.feed_update(bot, mention(331, "@it_test_bot оживи, пусть улыбнётся", reply_to_message=pic))
+        vids = [c for c in session.calls if isinstance(c, SendVideo)]
+        assert len(vids) == 1 and vids[0].reply_parameters.message_id == 331 and "улыбнётся" in vids[0].caption
+        model, prompt, image, seconds, ratio = xai.videos[-1]
+        assert model == app.cfg.video_model and image.startswith("data:image/jpeg") and seconds == 6 and ratio is None
+        assert [c for c in session.calls if isinstance(c, DeleteMessage)]  # "снимаю видео…" note
+        assert app.db.chat_usage_since(GROUP.id, "2000-01-01").videos == 1
+        # text-to-video and the per-user video limit
+        session.calls.clear()
+        for i in range(draw_mod.VIDEO_USER_LIMIT + 1):
+            await dp.feed_update(bot, mention(340 + i, f"@it_test_bot сними видео про море {i}, вертикально"))
+        assert xai.videos[-1][2] is None and xai.videos[-1][4] == "9:16"
+        assert any("за час" in m.text for m in session.sent())
+
+        # 5. /stats in the chat
+        session.calls.clear()
+        await dp.feed_update(bot, upd(message=Message(message_id=350, date=datetime.now(tz.utc), chat=GROUP,
+                                                      from_user=STRANGER, text="/stats")))
+        out = session.sent()[-1]
+        assert "Статистика чата за неделю" in out.text and "Stranger" in out.text and "сняла 2 видео" in out.text
+
+        # 6. weekly post: off by default; when on, stats + summary once a week, daily skipped that evening
+        for i in range(6):
+            await dp.feed_update(bot, upd(message=Message(message_id=360 + i, date=datetime.now(tz.utc), chat=GROUP,
+                                                          from_user=STRANGER, text=f"обсуждаем план {i}")))
+        now = datetime.now(tz.utc)
+        app.cfg = dataclasses.replace(app.cfg, summary_time=now.strftime("%H:%M"), weekly_day=now.weekday())
+        xai.next_result = ChatResult(text="**🗞 Итоги недели**\n- план", input_tokens=5, output_tokens=5)
+        session.calls.clear()
+        await summary.weekly_tick(bot, app)
+        assert session.sent() == []
+        app.db.set_flag(GROUP.id, "weekly_summary", True)
+        app.db.set_flag(GROUP.id, "daily_summary", True)
+        await summary.weekly_tick(bot, app)
+        await summary.weekly_tick(bot, app)
+        await summary.daily_tick(bot, app)
+        posted = [m.text for m in session.sent() if m.chat_id == GROUP.id]
+        assert len(posted) == 2 and "Статистика" in posted[0] and "Итоги недели" in posted[1]
+        assert "Сообщение недели" in xai.chats[-1][1][0]["content"]
+
+    draw_mod._video_log.clear()
     run(scenario())

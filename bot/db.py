@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS chats (
     download   INTEGER NOT NULL DEFAULT 1,
     daily_summary INTEGER NOT NULL DEFAULT 0,
     delete_links INTEGER NOT NULL DEFAULT 1,
+    weekly_summary INTEGER NOT NULL DEFAULT 0,
     added_by   INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -48,14 +49,16 @@ CREATE TABLE IF NOT EXISTS usage (
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     images        INTEGER NOT NULL DEFAULT 0,
+    videos        INTEGER NOT NULL DEFAULT 0,
+    tts_count     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, chat_id)
 );
 """
 
 ACTIVE_STATUSES = ("creator", "administrator", "member", "restricted")
-CHAT_FLAGS = ("enabled", "transcribe", "answer", "download", "daily_summary", "delete_links")
-HISTORY_KEEP = 5000  # per chat, hard cap
-HISTORY_DAYS = 3  # enough for daily summaries in busy chats
+CHAT_FLAGS = ("enabled", "transcribe", "answer", "download", "daily_summary", "delete_links", "weekly_summary")
+HISTORY_KEEP = 20000  # per chat, hard cap
+HISTORY_DAYS = 8  # enough for weekly summaries and stats
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,7 @@ class ChatRow:
     daily_summary: bool
     added_by: int | None
     delete_links: bool = True
+    weekly_summary: bool = False
 
     @property
     def active(self) -> bool:
@@ -101,6 +105,8 @@ class UsageTotals:
     input_tokens: int
     output_tokens: int
     images: int = 0
+    videos: int = 0
+    tts_count: int = 0
 
 
 def _today() -> str:
@@ -120,11 +126,13 @@ class Database:
 
     def _migrate(self) -> None:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(chats)")}
-        for col, default in (("download", 1), ("daily_summary", 0), ("delete_links", 1)):
+        for col, default in (("download", 1), ("daily_summary", 0), ("delete_links", 1), ("weekly_summary", 0)):
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE chats ADD COLUMN {col} INTEGER NOT NULL DEFAULT {default}")
-        if "images" not in {r["name"] for r in self._conn.execute("PRAGMA table_info(usage)")}:
-            self._conn.execute("ALTER TABLE usage ADD COLUMN images INTEGER NOT NULL DEFAULT 0")
+        usage_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(usage)")}
+        for col in ("images", "videos", "tts_count"):
+            if col not in usage_cols:
+                self._conn.execute(f"ALTER TABLE usage ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self._conn.close()
@@ -161,6 +169,7 @@ class Database:
             download=bool(row["download"]),
             daily_summary=bool(row["daily_summary"]),
             delete_links=bool(row["delete_links"]),
+            weekly_summary=bool(row["weekly_summary"]),
             added_by=row["added_by"],
         )
 
@@ -229,10 +238,10 @@ class Database:
                 self._conn.execute("UPDATE chats SET chat_id=? WHERE chat_id=?", (new_id, old_id))
             else:
                 self._conn.execute(
-                    "UPDATE chats SET enabled=?, transcribe=?, answer=?, download=?, daily_summary=?, delete_links=? "
-                    "WHERE chat_id=?",
+                    "UPDATE chats SET enabled=?, transcribe=?, answer=?, download=?, daily_summary=?, delete_links=?, "
+                    "weekly_summary=? WHERE chat_id=?",
                     (int(old.enabled), int(old.transcribe), int(old.answer), int(old.download),
-                     int(old.daily_summary), int(old.delete_links), new_id),
+                     int(old.daily_summary), int(old.delete_links), int(old.weekly_summary), new_id),
                 )
                 self._conn.execute("DELETE FROM chats WHERE chat_id=?", (old_id,))
             self._conn.execute("UPDATE OR IGNORE messages SET chat_id=? WHERE chat_id=?", (new_id, old_id))
@@ -314,34 +323,57 @@ class Database:
         input_tokens: int = 0,
         output_tokens: int = 0,
         images: int = 0,
+        videos: int = 0,
+        tts_count: int = 0,
     ) -> None:
         self._conn.execute(
             """
-            INSERT INTO usage(day, chat_id, stt_count, stt_seconds, llm_requests, input_tokens, output_tokens, images)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO usage(day, chat_id, stt_count, stt_seconds, llm_requests, input_tokens, output_tokens, images,
+                              videos, tts_count)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(day, chat_id) DO UPDATE SET
                 stt_count=stt_count+excluded.stt_count,
                 stt_seconds=stt_seconds+excluded.stt_seconds,
                 llm_requests=llm_requests+excluded.llm_requests,
                 input_tokens=input_tokens+excluded.input_tokens,
                 output_tokens=output_tokens+excluded.output_tokens,
-                images=images+excluded.images
+                images=images+excluded.images,
+                videos=videos+excluded.videos,
+                tts_count=tts_count+excluded.tts_count
             """,
-            (_today(), chat_id, stt_count, stt_seconds, llm_requests, input_tokens, output_tokens, images),
+            (_today(), chat_id, stt_count, stt_seconds, llm_requests, input_tokens, output_tokens, images, videos,
+             tts_count),
         )
 
     def images_today(self, chat_id: int) -> int:
         row = self._conn.execute("SELECT images FROM usage WHERE day=? AND chat_id=?", (_today(), chat_id)).fetchone()
         return int(row[0]) if row else 0
 
+    def videos_today(self, chat_id: int) -> int:
+        row = self._conn.execute("SELECT videos FROM usage WHERE day=? AND chat_id=?", (_today(), chat_id)).fetchone()
+        return int(row[0]) if row else 0
+
+    def chat_usage_since(self, chat_id: int, day: str) -> UsageTotals:
+        """One chat's usage from `day` (YYYY-MM-DD, UTC) on."""
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(stt_count),0), COALESCE(SUM(stt_seconds),0), COALESCE(SUM(llm_requests),0), "
+            "COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(images),0), "
+            "COALESCE(SUM(videos),0), COALESCE(SUM(tts_count),0) FROM usage WHERE chat_id=? AND day>=?",
+            (chat_id, day),
+        ).fetchone()
+        return UsageTotals(int(row[0]), float(row[1]), int(row[2]), int(row[3]), int(row[4]), int(row[5]),
+                           int(row[6]), int(row[7]))
+
     def usage_totals(self, day: str | None = None) -> UsageTotals:
         sql = (
             "SELECT COALESCE(SUM(stt_count),0), COALESCE(SUM(stt_seconds),0), COALESCE(SUM(llm_requests),0), "
-            "COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(images),0) FROM usage"
+            "COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(images),0), "
+            "COALESCE(SUM(videos),0), COALESCE(SUM(tts_count),0) FROM usage"
         )
         params: tuple = ()
         if day == "today":
             sql += " WHERE day=?"
             params = (_today(),)
         row = self._conn.execute(sql, params).fetchone()
-        return UsageTotals(int(row[0]), float(row[1]), int(row[2]), int(row[3]), int(row[4]), int(row[5]))
+        return UsageTotals(int(row[0]), float(row[1]), int(row[2]), int(row[3]), int(row[4]), int(row[5]),
+                           int(row[6]), int(row[7]))

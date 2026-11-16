@@ -421,3 +421,87 @@ def test_draw_requests():
     assert aspect_ratio("обои на телефон") == "9:16"
     assert aspect_ratio("16:9 горы") == "16:9"
     assert aspect_ratio("кот") is None
+
+
+def test_video_requests():
+    from bot.draw import requested_image, video_seconds
+    from aiogram.types import PhotoSize
+
+    def ask(text, **kw):
+        return requested_image(msg(f"@it_test_bot {text}", entities=[MessageEntity(type="mention", offset=0, length=12)],
+                                   **kw), ME, private=False)
+
+    photo = Message(message_id=5, date=NOW, chat=GROUP, from_user=ALICE,
+                    photo=[PhotoSize(file_id="p", file_unique_id="u", width=10, height=10)])
+    for text in ["оживи", "оживи фото, пусть улыбнётся", "сделай из этого видео", "анимируй", "пусть кот помашет лапой"]:
+        r = ask(text, reply=photo)
+        assert r is not None and r.video and r.source is photo, text
+    for text in ["сними видео, как кот играет на гитаре", "сделай короткий ролик про море", "сгенерируй видео 10 сек"]:
+        r = ask(text)
+        assert r is not None and r.video and r.source is None, text
+    r = ask("оживи")  # no photo: the bot explains how
+    assert r is not None and r.video and r.prompt == ""
+    for text in ["сделай саммари видео", "найди видео про котов", "оживи чат, а то все спят и молчат уже третий день"]:
+        r = ask(text)
+        assert r is None or not r.video, text
+    assert ask("переделай в стиле аниме", reply=photo).video is False
+    cmd = requested_image(msg("/video", reply=photo), ME, private=False)
+    assert cmd is not None and cmd.video and cmd.source is photo and cmd.prompt
+    assert video_seconds("кот, 8 секунд") == 8 and video_seconds("кот") == 6
+    assert video_seconds("15 сек") == 10 and video_seconds("15 сек", owner=True) == 15
+
+
+def test_voice_requests_and_plain_text():
+    from bot.textutil import md_to_plain
+    from bot.voice import requested_reading, wants_voice
+
+    for q in ["ответь голосом, кто такой Гагарин", "расскажи анекдот голосом", "голосом: что такое квазар",
+              "скажи вслух сколько будет 2+2", "tell me a joke in voice"]:
+        assert wants_voice(q), q
+    for q in ["как записать голосовое?", "почему голосовые не расшифровываются в чате", "что такое аудиокнига"]:
+        assert not wants_voice(q), q
+
+    src = Message(message_id=4, date=NOW, chat=GROUP, from_user=ALICE, text="Завтра в 10 у офиса")
+    ment = [MessageEntity(type="mention", offset=0, length=12)]
+    assert requested_reading(msg("@it_test_bot озвучь", entities=ment, reply=src), ME, private=False) == src.text
+    assert requested_reading(msg("@it_test_bot прочитай вслух, пожалуйста", entities=ment, reply=src), ME,
+                             private=False) == src.text
+    assert requested_reading(msg("@it_test_bot озвучь", entities=ment), ME, private=False) is None  # nothing to read
+    assert requested_reading(msg("@it_test_bot озвучь свой план на завтра", entities=ment, reply=src), ME,
+                             private=False) is None
+
+    plain = md_to_plain("**Привет** 👋\n- пункт [сайт](https://x.ai) и `код`\nhttps://example.com")
+    assert plain == "Привет\nпункт сайт и код"
+
+
+def test_stats_requests_and_build(tmp_path):
+    import time as _time
+    from types import SimpleNamespace
+    from bot import summary
+
+    ment = [MessageEntity(type="mention", offset=0, length=12)]
+    assert summary.requested_stats(msg("/stats"), ME) == 7
+    assert summary.requested_stats(msg("/stats 1"), ME) == 1
+    assert summary.requested_stats(msg("@it_test_bot кто больше всех пишет?", entities=ment), ME) == 7
+    assert summary.requested_stats(msg("@it_test_bot статистика за 3 дня", entities=ment), ME) == 3
+    assert summary.requested_stats(msg("@it_test_bot как дела?", entities=ment), ME) is None
+    assert summary.requested_hours(msg("@it_test_bot итоги недели", entities=ment), ME) == 168
+    assert summary.requested_hours(msg("/summary неделя"), ME) == 168
+    assert summary._period(168) == ("последнюю неделю", "недели")
+    assert [summary._days(n) for n in (1, 2, 5, 11, 21)] == ["1 день", "2 дня", "5 дней", "11 дней", "21 день"]
+
+    db = Database(tmp_path / "db.sqlite3")
+    now = int(_time.time())
+    rows = [(1, "Alice", "text")] * 5 + [(2, "Bob", "voice")] * 2 + [(3, "Eve", "photo")]
+    for i, (uid, name, kind) in enumerate(rows):
+        db.add_message(GROUP.id, i + 1, uid, name, kind, "hi", now - 3600)
+    db.add_message(GROUP.id, 50, ME.id, "Бот", "bot", "ответ", now - 3000)
+    db.add_message(GROUP.id, 51, ME.id, "Бот", "video", "(скачано из Instagram)", now - 3000)
+    db.add_usage(GROUP.id, llm_requests=3, images=1)
+    app = SimpleNamespace(db=db, me=ME, cfg=SimpleNamespace(timezone="UTC"))
+    text = summary.build_stats(app, GROUP.id, 7)
+    assert "Сообщений: **8** от **3**" in text
+    assert text.index("🥇 Alice — 5") < text.index("🥈 Bob — 2")
+    assert "🎙 голосовых: 2" in text and "📷 фото: 1" in text and "Скачала по ссылкам: 1" in text
+    assert "ответила на 3 вопр." in text and "нарисовала 1" in text
+    assert summary.build_stats(app, -1, 7) is None

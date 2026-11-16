@@ -1,9 +1,10 @@
-"""HTTP clients: xAI (Grok) for text answers, OpenAI for speech-to-text."""
+"""HTTP clients: xAI (Grok) for answers, pictures and videos; OpenAI for speech-to-text and text-to-speech."""
 from __future__ import annotations
 
 import asyncio
 import base64
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -97,7 +98,7 @@ class _JsonAPI:
     async def close(self) -> None:
         await self._http.aclose()
 
-    async def _request(self, method: str, path: str, *, attempts: int = 3, **kwargs: Any) -> Any:
+    async def _request(self, method: str, path: str, *, attempts: int = 3, raw: bool = False, **kwargs: Any) -> Any:
         delay = 2.0
         for attempt in range(1, attempts + 1):
             try:
@@ -108,6 +109,8 @@ class _JsonAPI:
                 log.warning("%s %s %s network error (attempt %d): %r", self.provider, method, path, attempt, exc)
             else:
                 if resp.status_code < 400:
+                    if raw:
+                        return resp.content
                     try:
                         return resp.json()
                     except ValueError as exc:
@@ -163,10 +166,45 @@ class XAIClient(_JsonAPI):
         if data.get("b64_json"):
             return base64.b64decode(data["b64_json"])
         if data.get("url"):
-            resp = await self._http.get(data["url"], headers={"Authorization": ""})
-            if resp.status_code == 200 and resp.content:
-                return resp.content
+            content = await _fetch(data["url"])
+            if content:
+                return content
         raise APIError(self.provider, None, "модель не вернула картинку")
+
+    async def video(self, model: str, prompt: str, *, image: str | None = None, duration: int = 6,
+                    aspect_ratio: str | None = None, resolution: str = "720p", timeout: float = 600.0,
+                    poll: float = 5.0) -> bytes:
+        """Grok Imagine video from text, or from `image` (data: URI or URL). Polls until done; returns MP4 bytes."""
+        body: dict[str, Any] = {"model": model, "prompt": prompt, "duration": duration, "resolution": resolution}
+        if image:
+            body["image"] = {"url": image}  # the output keeps the photo's aspect ratio
+        elif aspect_ratio:
+            body["aspect_ratio"] = aspect_ratio
+        start = await self._request("POST", "/videos/generations", json=body, attempts=2)
+        request_id = start.get("request_id") if isinstance(start, dict) else None
+        if not request_id:
+            raise APIError(self.provider, None, "видео не поставлено в очередь")
+        deadline = time.monotonic() + timeout
+        while True:
+            await asyncio.sleep(poll)
+            state = await self._request("GET", f"/videos/{request_id}", attempts=3)
+            status = state.get("status") if isinstance(state, dict) else None
+            if status == "done":
+                video = state.get("video") or {}
+                if video.get("respect_moderation") is False:
+                    raise APIError(self.provider, 400, "video rejected by content moderation")
+                content = await _fetch(video["url"]) if video.get("url") else b""
+                if not content:
+                    raise APIError(self.provider, None, "модель не вернула видео")
+                return content
+            if status in ("failed", "expired"):
+                err = state.get("error") or {}
+                message = err.get("message") if isinstance(err, dict) else str(err)
+                code = err.get("code") if isinstance(err, dict) else ""
+                status_code = 400 if code in ("invalid_argument", "permission_denied") else None
+                raise APIError(self.provider, status_code, f"{code or status}: {message or 'генерация не удалась'}")
+            if time.monotonic() > deadline:
+                raise APIError(self.provider, None, "видео не готово за 10 минут")
 
     async def respond(self, model: str, items: list[dict[str, Any]], *, search: bool = True,
                       max_turns: int = 5) -> ChatResult:
@@ -223,8 +261,18 @@ class XAIClient(_JsonAPI):
         )
 
 
+async def _fetch(url: str) -> bytes:
+    """Download a generated file (temporary CDN link; our API key is never sent there)."""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=20.0), follow_redirects=True) as client:
+        try:
+            resp = await client.get(url)
+        except httpx.HTTPError as exc:
+            raise APIError("xAI", None, f"файл не скачался: {type(exc).__name__}") from exc
+    return resp.content if resp.status_code == 200 else b""
+
+
 class OpenAITranscriber(_JsonAPI):
-    """OpenAI /v1/audio/transcriptions."""
+    """OpenAI /v1/audio/transcriptions and /v1/audio/speech."""
 
     provider = "OpenAI"
 
@@ -248,6 +296,16 @@ class OpenAITranscriber(_JsonAPI):
         langs = payload.get("languages") or []
         lang = payload.get("language") or (langs[0].get("code") if langs and isinstance(langs[0], dict) else "")
         return Transcript(text=str(payload.get("text") or "").strip(), language=str(lang or ""))
+
+    async def speech(self, text: str, *, model: str, voice: str, instructions: str = "") -> bytes:
+        """Text-to-speech as OGG/Opus, ready for Telegram's send_voice."""
+        body: dict[str, Any] = {"model": model, "input": text, "voice": voice, "response_format": "opus"}
+        if instructions and not model.startswith("tts-1"):
+            body["instructions"] = instructions
+        audio = await self._request("POST", "/audio/speech", json=body, raw=True)
+        if not audio:
+            raise APIError(self.provider, None, "пустой звук")
+        return audio
 
     async def list_models(self) -> list[str]:
         payload = await self._request("GET", "/models", attempts=2)

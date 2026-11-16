@@ -44,6 +44,26 @@ def md_to_html(text: str) -> str:
     return _PLACEHOLDER.sub(lambda m: stash[int(m.group(1))], text)
 
 
+_URL = re.compile(r"https?://\S+")
+_EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]")
+
+
+def md_to_plain(text: str) -> str:
+    """Markdown answer -> text for speech: no markup, links, code or emoji."""
+    text = _CODE_BLOCK.sub(" (код в тексте) ", text)
+    text = _INLINE_CODE.sub(r"\1", text)
+    text = _LINK.sub(r"\1", text)
+    text = _URL.sub("", text)
+    text = _HEADING.sub(r"\1.", text)
+    text = _BULLET.sub(r"\1", text)
+    text = _BOLD.sub(r"\1", text)
+    text = _STRIKE.sub(r"\1", text)
+    text = _ITALIC.sub(r"\1", text)
+    text = _EMOJI.sub("", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r" *\n[ \n]*", "\n", text).strip()
+
+
 def split_text(text: str, limit: int = CHUNK) -> list[str]:
     """Split on paragraph / line / word boundaries so each piece fits in one Telegram message."""
     text = text.strip()

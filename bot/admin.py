@@ -37,7 +37,9 @@ class Panel(CallbackData, prefix="p"):
 
 
 FLAG_LABELS = {"enabled": "Бот", "transcribe": "Расшифровка", "answer": "Ответы", "download": "Скачивание",
-               "daily_summary": "Итоги дня", "delete_links": "Удаление ссылок"}
+               "daily_summary": "Итоги дня", "delete_links": "Удаление ссылок", "weekly_summary": "Итоги недели"}
+WEEKDAYS_ON = ("по понедельникам", "по вторникам", "по средам", "по четвергам", "по пятницам", "по субботам",
+               "по воскресеньям")
 
 
 def btn(text: str, **kw) -> InlineKeyboardButton:
@@ -52,6 +54,8 @@ async def setup_commands(bot: Bot, app: App) -> None:
                 BotCommand(command="ask", description="Задать вопрос"),
                 BotCommand(command="summary", description="Итоги чата за сутки (/summary 6 — за 6 часов)"),
                 BotCommand(command="draw", description="Нарисовать картинку (Grok Imagine)"),
+                BotCommand(command="video", description="Снять видео (в ответ на фото — оживить его)"),
+                BotCommand(command="stats", description="Статистика чата за неделю (/stats 1 — за сутки)"),
             ],
             scope=BotCommandScopeAllGroupChats(),
         )
@@ -62,6 +66,7 @@ async def setup_commands(bot: Bot, app: App) -> None:
                     BotCommand(command="panel", description="Панель управления"),
                     BotCommand(command="reset", description="Очистить память личного диалога"),
                     BotCommand(command="draw", description="Нарисовать картинку"),
+                    BotCommand(command="video", description="Снять видео / оживить фото"),
                 ],
                 scope=BotCommandScopeChat(chat_id=app.owner_id),
             )
@@ -87,7 +92,9 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         "",
         f"Ответы (Grok): <code>{esc(app.chat_model())}</code>",
         f"Расшифровка (OpenAI): <code>{esc(app.cfg.stt_model)}</code>",
-        f"Картинки (Grok Imagine): <code>{esc(app.cfg.image_model)}</code>",
+        f"Картинки и видео (Grok Imagine): <code>{esc(app.cfg.image_model)}</code>, "
+        f"<code>{esc(app.cfg.video_model)}</code>",
+        f"Голос (OpenAI): <code>{esc(app.cfg.tts_model)}</code>, голос <code>{esc(app.cfg.tts_voice)}</code>",
         "Режим приватности бота: "
         + ("выключен ✅ (видит все сообщения в группах)" if app.me.can_read_all_group_messages
            else "включён — в группах, где бот не админ, он видит только /ask и ответы на свои сообщения"),
@@ -96,9 +103,11 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
            if app.cookies_path.exists() else "нет"),
         "",
         f"Сегодня: 🎙 {today.stt_count} ({fmt_duration(today.stt_seconds)}) · "
-        f"💬 {today.llm_requests} ({fmt_tokens(today.input_tokens + today.output_tokens)} ток.) · 🎨 {today.images}",
+        f"💬 {today.llm_requests} ({fmt_tokens(today.input_tokens + today.output_tokens)} ток.) · 🎨 {today.images}"
+        f" · 🎬 {today.videos} · 🔊 {today.tts_count}",
         f"Всего: 🎙 {total.stt_count} ({fmt_duration(total.stt_seconds)}) · "
-        f"💬 {total.llm_requests} ({fmt_tokens(total.input_tokens + total.output_tokens)} ток.) · 🎨 {total.images}",
+        f"💬 {total.llm_requests} ({fmt_tokens(total.input_tokens + total.output_tokens)} ток.) · 🎨 {total.images}"
+        f" · 🎬 {total.videos} · 🔊 {total.tts_count}",
         "",
     ]
     blind = [c for c in chats if c.enabled and not c.is_admin and not app.me.can_read_all_group_messages]
@@ -218,6 +227,8 @@ async def chat_view(bot: Bot, app: App, chat_id: int) -> tuple[str, InlineKeyboa
         [flip(f"📥 Скачивание по ссылкам: {'вкл' if row.download else 'выкл'}", "download")],
         [flip(f"🗑 Удалять сообщение со ссылкой: {'да' if row.delete_links else 'нет'}", "delete_links")],
         [flip(f"🗞 Итоги дня в {app.cfg.summary_time}: {'вкл' if row.daily_summary else 'выкл'}", "daily_summary")],
+        [flip(f"📅 Итоги недели {WEEKDAYS_ON[app.cfg.weekly_day]}: {'вкл' if row.weekly_summary else 'выкл'}",
+              "weekly_summary")],
         [btn("🧹 Очистить память", a="clr", c=row.chat_id)],
         [btn("🚪 Выйти из чата", a="leave", c=row.chat_id)],
         [btn("« Назад", a="home")],
@@ -501,8 +512,12 @@ async def announce(bot: Bot, app: App, chat_id: int) -> None:
     if row.download:
         parts.append("📥 скачиваю видео и фото по ссылкам вместе с текстом поста (Instagram, Threads, X, VK, Facebook, Pinterest…)")
     if row.answer:
-        parts.append("🗞 /summary — итоги чата за сутки")
-        parts.append(f"🎨 рисую картинки — «@{esc(app.me.username or '')} нарисуй …», а в ответ на фото — «переделай в стиле …»")
+        u = esc(app.me.username or "")
+        parts.append("🗞 /summary — итоги чата за сутки, /stats — статистика за неделю")
+        parts.append(f"🎨 рисую картинки — «@{u} нарисуй …», а в ответ на фото — «переделай в стиле …»")
+        parts.append(f"🎬 оживляю фото — ответьте на фото «@{u} оживи», или «@{u} сними видео …»")
+        parts.append(f"🔊 отвечаю голосом — «@{u} ответь голосом …», а «@{u} озвучь» в ответ на сообщение зачитает его")
+        parts.append("👀 вижу фото и скриншоты — спросите про них, ответив на картинку")
     if row.answer:
         parts.append(f"💬 отвечаю на вопросы — упомяните @{esc(app.me.username or '')}, ответьте на моё сообщение или напишите /ask")
     if not parts:

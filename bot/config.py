@@ -48,6 +48,10 @@ class Config:
     context_messages: int
     max_parallel_requests: int
     image_model: str = "grok-imagine-image-2.0"
+    video_model: str = "grok-imagine-video-1.5-lite"
+    tts_model: str = "gpt-4o-mini-tts"
+    tts_voice: str = "marin"
+    weekly_day: int = 6  # 0 = Monday … 6 = Sunday
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -80,6 +84,10 @@ class Config:
             timezone=os.environ.get("TIMEZONE", "").strip() or "UTC",
             summary_time=os.environ.get("SUMMARY_TIME", "").strip() or "21:00",
             image_model=os.environ.get("IMAGE_MODEL", "").strip() or "grok-imagine-image-2.0",
+            video_model=os.environ.get("VIDEO_MODEL", "").strip() or "grok-imagine-video-1.5-lite",
+            tts_model=os.environ.get("TTS_MODEL", "").strip() or "gpt-4o-mini-tts",
+            tts_voice=os.environ.get("TTS_VOICE", "").strip() or "marin",
+            weekly_day=max(0, min(6, _int("WEEKLY_DAY", 6))),
             context_messages=_int("CONTEXT_MESSAGES", 40),
             max_parallel_requests=_int("MAX_PARALLEL_REQUESTS", 4),
         )

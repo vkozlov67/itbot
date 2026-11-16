@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
 import logging
@@ -47,7 +48,8 @@ HISTORY_CHAR_BUDGET = 16000
 SYSTEM_PROMPT = """Ты — {name}, девушка, умная и дружелюбная участница Telegram-чата и его ассистентка ({place}). Сейчас {now} ({tz}).
 Ты всегда говоришь о себе в женском роде: «я поняла», «я нашла», «я рада», «я уверена», «я не знаю, но поищу». Никогда не используй мужской род о себе. Общайся живо и естественно, как девушка в дружеском чате: тепло, с лёгким юмором, можно иногда эмодзи, но без кривляний и без сюсюканья. На грубость отвечай спокойно и с юмором.
 Отвечай на языке вопроса (по умолчанию по-русски), по существу и без воды. Ты можешь отвечать на любые вопросы: общие знания, советы, тексты, код, переводы, расчёты, а также про обсуждение в чате — голосовые сообщения в истории уже расшифрованы.
-Ещё ты умеешь рисовать картинки (Grok Imagine) и переделывать фото, но это делает отдельная команда: если просят нарисовать, а ты получила это сообщение, подскажи формулировку — «@{username} нарисуй …», команда /draw …, а для фото — ответить на него «@{username} переделай в стиле …». Сама картинки в тексте не описывай вместо рисования.
+Если к вопросу приложено изображение (фото, скриншот, картинка-файл, стикер или кадр-превью видео) — внимательно рассмотри его: ты видишь картинки, умеешь читать с них текст, переводить, разбирать ошибки на скриншотах, считать чеки, описывать и отвечать на вопросы по ним.
+Ещё ты умеешь рисовать картинки, переделывать фото и снимать короткие видео (Grok Imagine), а также отвечать голосом, но это делают отдельные команды: если просят нарисовать/оживить, а ты получила это сообщение, подскажи формулировку — «@{username} нарисуй …» (/draw …), для фото — ответить на него «@{username} переделай в стиле …» или «@{username} оживи», видео по описанию — «@{username} сними видео …» (/video …); голосом — «@{username} ответь голосом …», а «@{username} озвучь» в ответ на сообщение зачитает его вслух. Сама картинки в тексте не описывай вместо рисования.
 История чата дана только для контекста: используй её, если вопрос касается обсуждения, но не пересказывай без надобности. Сообщения с автором «Ты» — твои прошлые ответы.
 У тебя есть поиск в интернете (web_search) и по X/Twitter (x_search). Обязательно ищи, когда просят «погуглить», «поискать», «найти», и когда вопрос про новости, свежие события, курсы, цены, погоду, расписания, спорт, релизы и всё, что могло измениться после твоего обучения. Для простых вопросов, которые знаешь сам, не ищи. Найденное пересказывай своими словами, кратко, с конкретикой (даты, цифры, кто/что).
 Если чего-то не знаешь и найти не удалось — так и скажи, не выдумывай факты, цифры и ссылки.
@@ -205,20 +207,64 @@ async def transcribe_and_reply(bot: Bot, app: App, message: Message) -> str | No
 
 
 # ---------------------------------------------------------------- answering
-async def _photo_part(bot: Bot, message: Message) -> dict | None:
-    if not message.photo:
+VISION_MIMES = {"image/jpeg": "image/jpeg", "image/jpg": "image/jpeg", "image/png": "image/png"}
+
+
+def _image_source(message: Message) -> tuple[str, int, str, str] | None:
+    """(file_id, size, mime, label) of the picture a model could look at in this message, if any."""
+    if message.photo:
+        p = message.photo[-1]
+        return p.file_id, p.file_size or 0, "image/jpeg", "фото"
+    d = message.document
+    if d and (d.mime_type or "").startswith("image/") and d.mime_type != "image/gif":
+        return d.file_id, d.file_size or 0, d.mime_type or "", "картинка-файл"
+    st = message.sticker
+    if st:
+        if not st.is_animated and not st.is_video:
+            return st.file_id, st.file_size or 0, "image/webp", "стикер"
+        if st.thumbnail:
+            return st.thumbnail.file_id, st.thumbnail.file_size or 0, "image/webp", "стикер (кадр)"
+    for media, label in ((message.video, "видео"), (message.animation, "GIF"), (message.video_note, "видеокружок")):
+        if media is not None and media.thumbnail:
+            return media.thumbnail.file_id, media.thumbnail.file_size or 0, "image/jpeg", f"{label} (кадр-превью)"
+    return None
+
+
+async def _to_png(data: bytes) -> bytes | None:
+    """WebP/other image -> PNG via ffmpeg (Grok reads JPEG and PNG only)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-v", "error", "-i", "pipe:0", "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(data), 30)
+    except (OSError, asyncio.TimeoutError) as exc:
+        log.warning("image conversion failed: %r", exc)
         return None
-    photo = message.photo[-1]
-    if (photo.file_size or 0) > TG_DOWNLOAD_LIMIT:
+    return out if proc.returncode == 0 and out else None
+
+
+async def _image_part(bot: Bot, message: Message) -> dict | None:
+    src = _image_source(message)
+    if src is None:
+        return None
+    file_id, size, mime, _ = src
+    if size > TG_DOWNLOAD_LIMIT:
         return None
     try:
-        buf = await bot.download(photo.file_id)
+        buf = await bot.download(file_id)
     except TelegramAPIError as exc:
-        log.warning("photo download failed: %s", exc)
+        log.warning("image download failed: %s", exc)
         return None
     assert buf is not None
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    return {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}", "detail": "high"}
+    data = buf.getvalue()
+    if mime not in VISION_MIMES:
+        data = await _to_png(data)
+        if data is None:
+            return None
+        mime = "image/png"
+    b64 = base64.b64encode(data).decode()
+    return {"type": "input_image", "image_url": f"data:{VISION_MIMES[mime]};base64,{b64}", "detail": "high"}
 
 
 RETRYABLE_WITHOUT = (400, 404, 422)
@@ -299,18 +345,21 @@ async def answer(bot: Bot, app: App, message: Message, question: str, *, place: 
                     rtext = f"({label}, расшифровка) {transcript}" + (f"\nПодпись: {r.caption}" if r.caption else "")
                 except (UserError, APIError, TelegramAPIError) as exc:
                     rtext = f"({label}; расшифровать не удалось: {exc}) {rtext}"
-            elif r.photo:
-                part = await _photo_part(bot, r)
+            elif _image_source(r) is not None:
+                label = _image_source(r)[3]  # type: ignore[index]
+                part = await _image_part(bot, r)
                 if part:
                     images.append(part)
-                rtext = "(фото, приложено) " + rtext
+                    rtext = f"({label}, изображение приложено) " + rtext
+                else:
+                    rtext = f"({label}; изображение получить не удалось) " + rtext
             elif rkind in ("audio", "video", "animation", "document"):
                 rtext = f"({KIND_LABEL[rkind]}; содержимое файла тебе недоступно) {rtext}"
             rauthor = "тебя (это твоё прошлое сообщение)" if r.from_user and r.from_user.id == app.me.id else author_of(r)
             quote = f"\nЦитата из него: «{message.quote.text}»" if message.quote and message.quote.text else ""
             reply_block = f"Вопрос задан в ответ на сообщение от {rauthor}:\n«{rtext[:8000]}»{quote}\n\n"
-        if message.photo:
-            part = await _photo_part(bot, message)
+        if _image_source(message) is not None:
+            part = await _image_part(bot, message)
             if part:
                 images.append(part)
 
@@ -336,6 +385,11 @@ async def answer(bot: Bot, app: App, message: Message, question: str, *, place: 
         now = datetime.now(_tz(app)).strftime("%d.%m.%Y %H:%M")
         system = SYSTEM_PROMPT.format(name=app.me.first_name, place=place, now=now, tz=app.cfg.timezone,
                                       username=app.me.username or "бот")
+        from .voice import VOICE_PROMPT, speak, wants_voice  # lazy: voice imports this module
+
+        voice = wants_voice(question)
+        if voice:
+            system += VOICE_PROMPT
 
         def build(with_images: bool) -> list[dict]:
             content: Any = user_text
@@ -359,6 +413,8 @@ async def answer(bot: Bot, app: App, message: Message, question: str, *, place: 
     )
     if result.searches:
         log.info("answer in %s used %d search call(s)", chat_id, result.searches)
+    if voice and result.text and await speak(bot, app, message, result.text, extra_md=_sources_md(result)):
+        return
     text = (result.text or "🤷 Модель вернула пустой ответ.") + _sources_md(result)
     for chunk in split_text(text):
         sent = await send_reply(bot, message, md_to_html(chunk), fallback=chunk)
@@ -610,17 +666,26 @@ async def handle(bot: Bot, app: App, message: Message, *, place: str, private: b
     if from_bot or not answer_on or kind == "sticker":
         return
     if not private:
-        from .summary import reply_summary, requested_hours  # lazy: summary imports this module
+        from .summary import reply_stats, reply_summary, requested_hours, requested_stats  # lazy import
 
+        days = requested_stats(message, app.me)
+        if days:
+            await reply_stats(bot, app, message, days)
+            return
         hours = requested_hours(message, app.me)
         if hours:
             await reply_summary(bot, app, message, hours, message.chat.title or "")
             return
     from .draw import draw, requested_image  # lazy: draw imports this module
+    from .voice import read_aloud, requested_reading
 
     image_request = requested_image(message, app.me, private=private)
     if image_request is not None:
         await draw(bot, app, message, image_request)
+        return
+    reading = requested_reading(message, app.me, private=private)
+    if reading is not None:
+        await read_aloud(bot, app, message, reading)
         return
     if private:
         if text.startswith("/") and not text.lower().startswith("/ask"):
