@@ -71,7 +71,7 @@ Telegram-бот: расшифровывает голосовые и кружки
 | `OPENAI_API_KEY` | ключ OpenAI (platform.openai.com) — для расшифровки |
 | `STT_MODEL` | модель расшифровки (`gpt-transcribe`; setup выбирает лучшую доступную) |
 | `OWNER_ID` | (необязательно) Telegram ID владельца; иначе владелец назначается по ссылке из `itbot-setup` |
-| `CHAT_MODEL` | модель по умолчанию (`grok-4.3`); меняется и в `/panel` |
+| `CHAT_MODEL` | модель по умолчанию (`grok-4.7`); меняется и в `/panel` |
 | `STT_LANGUAGE` | пусто = автоопределение языка; `ru` — подсказать язык (точнее и быстрее, если в чате все говорят по-русски) |
 | `IMAGE_MODEL` | модель для картинок (`grok-imagine-image-2.0` ≈ $0.04; `grok-imagine-image` ≈ $0.02) |
 | `VIDEO_MODEL` | модель для видео (`grok-imagine-video-1.5-lite` ≈ $0.02/с; `grok-imagine-video-1.5` ≈ $0.08/с — 1080p) |

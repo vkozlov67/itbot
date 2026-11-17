@@ -176,7 +176,7 @@ def main() -> None:
     )
     print(f"  ✓ Ключ Grok работает ({len(xai_models)} моделей)")
     env["XAI_API_KEY"] = xai_key
-    chat_model = env.get("CHAT_MODEL") or "grok-4.3"
+    chat_model = env.get("CHAT_MODEL") or "grok-4.7"
     if xai_models and chat_model not in xai_models:
         print(f"  ! Модель {chat_model} не найдена у xAI — выберите другую в /panel → Модель.")
     env["CHAT_MODEL"] = chat_model

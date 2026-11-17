@@ -78,7 +78,7 @@ class Config:
             openai_api_key=openai_key,
             owner_id=int(owner_raw) if owner_raw else None,
             claim_code=os.environ.get("CLAIM_CODE", "").strip(),
-            chat_model=os.environ.get("CHAT_MODEL", "").strip() or "grok-4.3",
+            chat_model=os.environ.get("CHAT_MODEL", "").strip() or "grok-4.7",
             stt_model=os.environ.get("STT_MODEL", "").strip() or "gpt-transcribe",
             stt_language=os.environ.get("STT_LANGUAGE", "").strip(),
             xai_base_url=os.environ.get("XAI_BASE_URL", "").strip() or "https://api.x.ai/v1",
