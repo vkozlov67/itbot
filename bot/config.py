@@ -47,6 +47,7 @@ class Config:
     summary_time: str
     context_messages: int
     max_parallel_requests: int
+    hard_model: str = "grok-4.7"  # stronger model for hard questions; "" = off
     image_model: str = "grok-imagine-image-2.0"
     video_model: str = "grok-imagine-video-1.5-lite"
     tts_model: str = "gpt-4o-mini-tts"
@@ -55,6 +56,7 @@ class Config:
     elevenlabs_api_key: str = ""  # optional: ElevenLabs voice instead of OpenAI TTS
     elevenlabs_voice_id: str = ""  # empty = first female voice of the account
     elevenlabs_model: str = "eleven_multilingual_v2"
+    reasoning_effort: str = ""  # Grok thinking depth: "" (model default) / low / medium / high
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -78,7 +80,8 @@ class Config:
             openai_api_key=openai_key,
             owner_id=int(owner_raw) if owner_raw else None,
             claim_code=os.environ.get("CLAIM_CODE", "").strip(),
-            chat_model=os.environ.get("CHAT_MODEL", "").strip() or "grok-4.7",
+            chat_model=os.environ.get("CHAT_MODEL", "").strip() or "grok-4.3",
+            hard_model=os.environ.get("HARD_MODEL", "grok-4.7").strip(),
             stt_model=os.environ.get("STT_MODEL", "").strip() or "gpt-transcribe",
             stt_language=os.environ.get("STT_LANGUAGE", "").strip(),
             xai_base_url=os.environ.get("XAI_BASE_URL", "").strip() or "https://api.x.ai/v1",
@@ -91,6 +94,7 @@ class Config:
             tts_model=os.environ.get("TTS_MODEL", "").strip() or "gpt-4o-mini-tts",
             tts_voice=os.environ.get("TTS_VOICE", "").strip() or "marin",
             weekly_day=max(0, min(6, _int("WEEKLY_DAY", 6))),
+            reasoning_effort=os.environ.get("REASONING_EFFORT", "").strip().lower(),
             elevenlabs_api_key=os.environ.get("ELEVENLABS_API_KEY", "").strip(),
             elevenlabs_voice_id=os.environ.get("ELEVENLABS_VOICE_ID", "").strip(),
             elevenlabs_model=os.environ.get("ELEVENLABS_MODEL", "").strip() or "eleven_multilingual_v2",

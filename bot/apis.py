@@ -14,6 +14,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 RETRY_STATUSES = {408, 409, 429, 500, 502, 503, 504}
+RESPONSE_TIMEOUT = 600.0  # seconds a Grok answer may take (hard puzzles with reasoning take minutes)
 NON_CHAT_MARKERS = ("imagine", "image", "video", "voice", "tts", "stt", "transcribe", "embed")
 # Containers OpenAI's transcription endpoint accepts (by filename extension).
 OPENAI_AUDIO_EXTS = {"flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "wav", "webm"}
@@ -108,13 +109,14 @@ class _JsonAPI:
     async def close(self) -> None:
         await self._http.aclose()
 
-    async def _request(self, method: str, path: str, *, attempts: int = 3, raw: bool = False, **kwargs: Any) -> Any:
+    async def _request(self, method: str, path: str, *, attempts: int = 3, raw: bool = False,
+                       retry_timeouts: bool = True, **kwargs: Any) -> Any:
         delay = 2.0
         for attempt in range(1, attempts + 1):
             try:
                 resp = await self._http.request(method, path, **kwargs)
             except httpx.HTTPError as exc:
-                if attempt == attempts:
+                if attempt == attempts or (not retry_timeouts and isinstance(exc, httpx.ReadTimeout)):
                     raise APIError(self.provider, None, f"сетевая ошибка: {type(exc).__name__}") from exc
                 log.warning("%s %s %s network error (attempt %d): %r", self.provider, method, path, attempt, exc)
             else:
@@ -142,6 +144,7 @@ class XAIClient(_JsonAPI):
     """Grok chat completions (OpenAI-compatible API at api.x.ai)."""
 
     provider = "xAI"
+    reasoning_effort = ""  # "" = the model's default; "low" / "medium" / "high" for reasoning models
 
     async def chat(self, model: str, messages: list[dict[str, Any]]) -> ChatResult:
         payload = await self._request(
@@ -224,7 +227,12 @@ class XAIClient(_JsonAPI):
             body["tools"] = [{"type": "web_search"}, {"type": "x_search"}]
             body["max_turns"] = max_turns
             body["include"] = ["no_inline_citations"]
-        payload = await self._request("POST", "/responses", json=body, attempts=2)
+        if self.reasoning_effort:
+            body["reasoning"] = {"effort": self.reasoning_effort}
+        # Reasoning models may think for minutes: wait long, and never re-run a request that timed out
+        # (it would take as long again and be billed twice).
+        payload = await self._request("POST", "/responses", json=body, attempts=2, retry_timeouts=False,
+                                      timeout=httpx.Timeout(RESPONSE_TIMEOUT, connect=20.0))
         if not isinstance(payload, dict):
             raise APIError(self.provider, None, "неожиданный ответ")
         texts: list[str] = []

@@ -91,7 +91,8 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
     lines = [
         "<b>⚙️ Панель управления</b>",
         "",
-        f"Ответы (Grok): <code>{esc(app.chat_model())}</code>",
+        f"Ответы (Grok): <code>{esc(app.chat_model())}</code>"
+        + (f", сложные задачи — <code>{esc(app.hard_model())}</code>" if app.hard_model() else ""),
         f"Расшифровка (OpenAI): <code>{esc(app.cfg.stt_model)}</code>",
         f"Картинки и видео (Grok Imagine): <code>{esc(app.cfg.image_model)}</code>, "
         f"<code>{esc(app.cfg.video_model)}</code>",

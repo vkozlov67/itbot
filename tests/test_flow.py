@@ -82,10 +82,18 @@ class FakeXAI:
 
     last_search = None
 
+    delay = 0.0
+
     async def respond(self, model, items, search=True, max_turns=5):
+        if self.delay:
+            await asyncio.sleep(self.delay)
         self.chats.append((model, items))
         self.last_search = search
+        if self.queued:
+            return self.queued.pop(0)
         return self.next_result
+
+    queued: list = []  # results returned first, one per call (then next_result)
 
     next_result = ChatResult(text="**Завтра в 10:00** у офиса.", input_tokens=50, output_tokens=10)
 
@@ -604,6 +612,8 @@ def test_vision_voice_video_stats_weekly(env):
         content = xai.chats[-1][1][1]["content"]
         assert content[1]["image_url"].startswith("data:image/png;base64,")
         assert "картинка-файл, изображение приложено" in content[0]["text"]
+        assert xai.last_search is False  # a picture question does not search unless asked to
+        assert "поиск в интернете отключён" in xai.chats[-1][1][0]["content"]
         assert "скриншот" in xai.chats[-1][1][0]["content"]  # the system prompt knows it can see pictures
         # a sticker that cannot be converted is described instead of crashing
         st = Message(message_id=302, date=NOW, chat=GROUP, from_user=OWNER,
@@ -751,5 +761,75 @@ def test_voice_question_gets_voice_answer(env, monkeypatch):
         await dp.feed_update(bot, voice_reply(403))
         assert not [c for c in session.calls if isinstance(c, SendVoice)]
         assert any("в 10" in (m.text or "") for m in session.sent())
+
+    run(scenario())
+
+
+def test_slow_answer_posts_and_removes_thinking_note(env, monkeypatch):
+    from datetime import datetime, timezone as tz
+
+    bot, dp, app, session, xai = env
+    monkeypatch.setattr(chat, "THINKING_AFTER", 0.01)
+
+    async def scenario():
+        app.db.set_setting("owner_id", str(OWNER.id))
+        await dp.feed_update(bot, added(GROUP, OWNER, admin_member()))
+        session.calls.clear()
+        xai.delay = 0.1
+        await dp.feed_update(bot, upd(message=Message(
+            message_id=500, date=datetime.now(tz.utc), chat=GROUP, from_user=STRANGER, text="@it_test_bot ребус?",
+            entities=[MessageEntity(type="mention", offset=0, length=12)])))
+        texts = [m.text for m in session.sent()]
+        assert any("Думаю" in t for t in texts) and any("Завтра в 10:00" in t for t in texts)
+        assert [c for c in session.calls if isinstance(c, DeleteMessage)]  # the note is removed
+        # a fast answer never posts the note
+        xai.delay = 0
+        session.calls.clear()
+        await dp.feed_update(bot, upd(message=Message(
+            message_id=501, date=datetime.now(tz.utc), chat=GROUP, from_user=STRANGER, text="@it_test_bot привет",
+            entities=[MessageEntity(type="mention", offset=0, length=12)])))
+        assert not any("Думаю" in m.text for m in session.sent())
+        assert not [c for c in session.calls if isinstance(c, DeleteMessage)]
+
+    run(scenario())
+
+
+def test_hard_questions_go_to_the_strong_model(env):
+    from datetime import datetime, timezone as tz
+
+    bot, dp, app, session, xai = env
+    assert app.hard_model() == "grok-4.7"
+
+    async def ask(mid, text):
+        xai.chats.clear()
+        session.calls.clear()
+        await dp.feed_update(bot, upd(message=Message(
+            message_id=mid, date=datetime.now(tz.utc), chat=GROUP, from_user=STRANGER, text=f"@it_test_bot {text}",
+            entities=[MessageEntity(type="mention", offset=0, length=12)])))
+        return [m for m, _ in xai.chats], [m.text for m in session.sent()]
+
+    async def scenario():
+        app.db.set_setting("owner_id", str(OWNER.id))
+        await dp.feed_update(bot, added(GROUP, OWNER, admin_member()))
+        # an ordinary question: the chat model only, told it may hand the task over
+        models, texts = await ask(600, "как дела?")
+        assert models == ["grok-4.3"]
+        assert chat.ESCALATE_MARK in xai.chats[0][1][0]["content"]
+        # a puzzle goes straight to the strong model, without the hand-over note
+        models, _ = await ask(601, "разгадай ребус")
+        assert models == ["grok-4.7"]
+        assert chat.ESCALATE_MARK not in xai.chats[0][1][0]["content"]
+        # the chat model gives up or only promises an answer: the strong model answers
+        for gave_up in (chat.ESCALATE_MARK, "Сейчас разберу дорожку почтальона и соберу буквы по порядку."):
+            xai.queued = [ChatResult(text=gave_up, input_tokens=5, output_tokens=1)]
+            models, texts = await ask(602, "сколько будет, если…")
+            assert models == ["grok-4.3", "grok-4.7"]
+            assert chat.ESCALATE_MARK not in xai.chats[1][1][0]["content"]
+            assert any("Завтра в 10:00" in t for t in texts) and not any(gave_up in t for t in texts)
+        # the strong model chosen as the chat model: no fallback
+        app.db.set_setting("chat_model", "grok-4.7")
+        assert app.hard_model() == ""
+        models, _ = await ask(603, "как дела?")
+        assert models == ["grok-4.7"] and chat.ESCALATE_MARK not in xai.chats[0][1][0]["content"]
 
     run(scenario())

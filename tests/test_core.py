@@ -544,3 +544,14 @@ def test_elevenlabs_client_picks_voice_and_parses_errors():
         await c.close()
 
     asyncio.run(go())
+
+
+def test_search_only_when_asked_for_picture_questions():
+    from bot.chat import search_wanted
+
+    assert search_wanted("кто такой Гагарин", False)  # text questions: Grok decides itself
+    assert not search_wanted("разгадай ребус", True)
+    assert not search_wanted("что тут написано?", True)
+    assert search_wanted("найди, что это за модель телефона", True)
+    assert search_wanted("погугли эту ошибку", True)
+    assert search_wanted("сколько это стоит сейчас?", True)

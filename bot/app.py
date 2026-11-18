@@ -85,6 +85,11 @@ class App:
     def chat_model(self) -> str:
         return self.db.get_setting("chat_model") or self.cfg.chat_model
 
+    def hard_model(self) -> str:
+        """Model for hard questions (puzzles, multi-step logic); "" when off or the same as the chat model."""
+        hard = self.cfg.hard_model
+        return "" if not hard or hard == self.chat_model() else hard
+
     def media_lock(self, chat_id: int, message_id: int) -> asyncio.Lock:
         key = (chat_id, message_id)
         lock = self._media_locks.get(key)

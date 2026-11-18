@@ -44,6 +44,8 @@ KIND_LABEL = {
     "document": "файл",
 }
 HISTORY_CHAR_BUDGET = 16000
+NO_SEARCH_NOTE = ("\nДля этого вопроса поиск в интернете отключён — инструментов нет. Отвечай сама по картинке и своим "
+                  "знаниям, сразу полным ответом.")
 
 SYSTEM_PROMPT = """Ты — {name}, девушка, умная и дружелюбная участница Telegram-чата и его ассистентка ({place}). Сейчас {now} ({tz}).
 Ты всегда говоришь о себе в женском роде: «я поняла», «я нашла», «я рада», «я уверена», «я не знаю, но поищу». Никогда не используй мужской род о себе. Общайся живо и естественно, как девушка в дружеском чате: тепло, с лёгким юмором, можно иногда эмодзи, но без кривляний и без сюсюканья. На грубость отвечай спокойно и с юмором.
@@ -53,6 +55,7 @@ SYSTEM_PROMPT = """Ты — {name}, девушка, умная и дружелю
 История чата дана только для контекста: используй её, если вопрос касается обсуждения, но не пересказывай без надобности. Сообщения с автором «Ты» — твои прошлые ответы.
 У тебя есть поиск в интернете (web_search) и по X/Twitter (x_search). Обязательно ищи, когда просят «погуглить», «поискать», «найти», и когда вопрос про новости, свежие события, курсы, цены, погоду, расписания, спорт, релизы и всё, что могло измениться после твоего обучения. Для простых вопросов, которые знаешь сам, не ищи. Найденное пересказывай своими словами, кратко, с конкретикой (даты, цифры, кто/что).
 Если чего-то не знаешь и найти не удалось — так и скажи, не выдумывай факты, цифры и ссылки.
+Твой ответ — одно сообщение, второго хода у тебя нет: сразу давай готовый результат (решение, ответ, вывод). Никогда не пиши «сейчас посмотрю / разберу / проверю» — сначала сделай, потом ответь. Головоломки, ребусы и задачи решай сама до конца.
 Форматирование: простой Markdown — **жирный**, *курсив*, `код`, блоки ```код```, списки через «- ». Не используй таблицы и заголовки #. Обычно укладывайся в 1500 символов, если не просят подробнее."""
 
 
@@ -270,17 +273,83 @@ async def _image_part(bot: Bot, message: Message) -> dict | None:
 RETRYABLE_WITHOUT = (400, 404, 422)
 
 
-async def _ask_model(app: App, model: str, items: list[dict], items_no_images: list[dict] | None) -> ChatResult:
+# With a picture attached, web search is used only when asked for: otherwise the model may search dozens of
+# times, re-reading the image every turn (a rebus once cost ~1.7M tokens and still came out wrong).
+SEARCH_ASKED_RE = re.compile(
+    r"погугл|загугл|гугл|поищи|поиск|найди|найти|ищи|в интернете|в сети|в инете|источник|ссылк|новост|"
+    r"актуальн|свеж|сегодня|сейчас|цен[аыу]|стоит|курс|google|search|look up|find",
+    re.I,
+)
+
+
+def search_wanted(question: str, has_images: bool) -> bool:
+    return not has_images or bool(SEARCH_ASKED_RE.search(question))
+
+
+# Hard questions go to app.hard_model(): puzzles straight away; anything else when the chat model gives up
+# (answers with ESCALATE_MARK) or only promises to answer instead of answering.
+HARD_RE = re.compile(
+    r"ребус|головоломк|загадк|шарад|кроссворд|судоку|криптограмм|олимпиадн|логическ\w* задач|"
+    r"докажи|доказательств|rebus|riddle|puzzle",
+    re.I,
+)
+ESCALATE_MARK = "[[СЛОЖНО]]"
+ESCALATE_NOTE = (f"\nЕсли вопрос — трудная задача (головоломка, загадка по картинке, многошаговая логика или математика) "
+                 f"и ты не уверена, что решишь её правильно, не угадывай: ответь ровно {ESCALATE_MARK} и больше ничего — "
+                 f"тогда её решит более сильная модель.")
+PROMISE_RE = re.compile(
+    r"^\W*(сейчас|щас|ща|секунд\w*|минутк\w*|погоди|подожди|дай\w* (мне )?(подумать|минутк\w*|секунд\w*))\b.{0,200}?"
+    r"(разбер|посмотр|провер|прослеж|подума|свер|собер|реш|поищ|найд|глян|посчита)",
+    re.I | re.S,
+)
+
+
+def is_hard_question(question: str) -> bool:
+    return bool(HARD_RE.search(question))
+
+
+def gave_up(text: str) -> bool:
+    """The chat model escalated, answered nothing, or only promised to answer ("сейчас разберу…")."""
+    text = (text or "").strip()
+    return not text or ESCALATE_MARK in text or (len(text) < 400 and bool(PROMISE_RE.match(text)))
+
+
+async def _ask_model(app: App, model: str, items: list[dict], items_no_images: list[dict] | None,
+                     *, search: bool = True) -> ChatResult:
     """Responses API with search; on rejection retry without images, then plain chat completions."""
     attempts = [items] + ([items_no_images] if items_no_images else [])
     for attempt in attempts:
         try:
-            return await app.xai.respond(model, attempt)
+            return await app.xai.respond(model, attempt, search=search)
         except APIError as exc:
             if exc.status not in RETRYABLE_WITHOUT:
                 raise
             log.warning("responses API rejected request (%s), trying fallback", exc)
     return await app.xai.chat(model, to_chat_messages(attempts[-1]))
+
+
+THINKING_AFTER = 25  # seconds before telling the chat that a hard question takes a while
+
+
+async def _thinking_note(bot: Bot, message: Message) -> Message | None:
+    """After THINKING_AFTER seconds without an answer, post a short "thinking" note (deleted once answered)."""
+    await asyncio.sleep(THINKING_AFTER)
+    try:
+        return await send_reply(bot, message, "🤔 Думаю, задача непростая — это может занять пару минут…")
+    except TelegramAPIError:
+        return None
+
+
+async def _drop_note(bot: Bot, note: asyncio.Task) -> None:
+    if not note.done():
+        note.cancel()
+        return
+    sent = None if note.cancelled() or note.exception() else note.result()
+    if sent is not None:
+        try:
+            await bot.delete_message(sent.chat.id, sent.message_id)
+        except TelegramAPIError:
+            pass
 
 
 def _sources_md(result: ChatResult, limit: int = 5) -> str:
@@ -393,22 +462,44 @@ async def answer(bot: Bot, app: App, message: Message, question: str, *, place: 
         if voice:
             system += VOICE_PROMPT
 
-        def build(with_images: bool) -> list[dict]:
+        search = search_wanted(question, bool(images))
+        if not search:
+            system += NO_SEARCH_NOTE
+
+        model, hard = app.chat_model(), app.hard_model()
+        if hard and is_hard_question(question):
+            model, hard = hard, ""  # straight to the strong model; nothing to fall back to
+
+        def build(with_images: bool, prompt: str) -> list[dict]:
             content: Any = user_text
             if with_images and images:
                 content = [{"type": "input_text", "text": user_text}, *images]
-            return [{"role": "system", "content": system}, {"role": "user", "content": content}]
+            return [{"role": "system", "content": prompt}, {"role": "user", "content": content}]
 
+        async def ask(model: str, prompt: str) -> ChatResult:
+            return await _ask_model(app, model, build(True, prompt), build(False, prompt) if images else None,
+                                    search=search)
+
+        note = asyncio.create_task(_thinking_note(bot, message))
         try:
             async with app.sem:
-                result = await _ask_model(app, app.chat_model(), build(True), build(False) if images else None)
+                result = await ask(model, system + (ESCALATE_NOTE if hard else ""))
+                if hard and gave_up(result.text):
+                    log.info("chat model gave up in %s (%.60r), asking %s", chat_id, result.text, hard)
+                    app.db.add_usage(chat_id, llm_requests=1, input_tokens=result.input_tokens,
+                                     output_tokens=result.output_tokens)
+                    result = await ask(hard, system)
         except APIError as exc:
             log.error("chat failed in %s: %s", chat_id, exc)
             alert = _alert_if_account_problem(bot, app, exc)
             if alert:
                 await alert
-            await send_reply(bot, message, "⚠️ Не удалось получить ответ от модели. Попробуйте позже.")
+            timeout = "ReadTimeout" in str(exc)
+            await send_reply(bot, message, "⚠️ Модель думала слишком долго и не ответила. Попробуйте упростить вопрос."
+                             if timeout else "⚠️ Не удалось получить ответ от модели. Попробуйте позже.")
             return
+        finally:
+            await _drop_note(bot, note)
 
     app.db.add_usage(
         chat_id, llm_requests=1, input_tokens=result.input_tokens, output_tokens=result.output_tokens
