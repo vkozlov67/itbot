@@ -57,6 +57,7 @@ class Config:
     elevenlabs_voice_id: str = ""  # empty = first female voice of the account
     elevenlabs_model: str = "eleven_multilingual_v2"
     reasoning_effort: str = ""  # Grok thinking depth: "" (model default) / low / medium / high
+    hard_effort: str = "medium"  # for the hard model: its default "high" took 12+ minutes on a puzzle
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -95,6 +96,7 @@ class Config:
             tts_voice=os.environ.get("TTS_VOICE", "").strip() or "marin",
             weekly_day=max(0, min(6, _int("WEEKLY_DAY", 6))),
             reasoning_effort=os.environ.get("REASONING_EFFORT", "").strip().lower(),
+            hard_effort=os.environ.get("HARD_REASONING_EFFORT", "medium").strip().lower(),
             elevenlabs_api_key=os.environ.get("ELEVENLABS_API_KEY", "").strip(),
             elevenlabs_voice_id=os.environ.get("ELEVENLABS_VOICE_ID", "").strip(),
             elevenlabs_model=os.environ.get("ELEVENLABS_MODEL", "").strip() or "eleven_multilingual_v2",

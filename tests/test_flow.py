@@ -75,6 +75,7 @@ class FakeXAI:
     def __init__(self):
         self.transcribed = []
         self.chats = []
+        self.efforts = []
 
     async def transcribe(self, audio, filename, mime, language=""):
         self.transcribed.append((audio, filename, mime))
@@ -84,10 +85,11 @@ class FakeXAI:
 
     delay = 0.0
 
-    async def respond(self, model, items, search=True, max_turns=5):
+    async def respond(self, model, items, search=True, max_turns=5, effort=None):
         if self.delay:
             await asyncio.sleep(self.delay)
         self.chats.append((model, items))
+        self.efforts.append(effort)
         self.last_search = search
         if self.queued:
             return self.queued.pop(0)
@@ -813,11 +815,11 @@ def test_hard_questions_go_to_the_strong_model(env):
         await dp.feed_update(bot, added(GROUP, OWNER, admin_member()))
         # an ordinary question: the chat model only, told it may hand the task over
         models, texts = await ask(600, "как дела?")
-        assert models == ["grok-4.3"]
+        assert models == ["grok-4.3"] and xai.efforts[-1] is None
         assert chat.ESCALATE_MARK in xai.chats[0][1][0]["content"]
         # a puzzle goes straight to the strong model, without the hand-over note
         models, _ = await ask(601, "разгадай ребус")
-        assert models == ["grok-4.7"]
+        assert models == ["grok-4.7"] and xai.efforts[-1] == "medium"  # "high" thinks for 12+ minutes
         assert chat.ESCALATE_MARK not in xai.chats[0][1][0]["content"]
         # the chat model gives up or only promises an answer: the strong model answers
         for gave_up in (chat.ESCALATE_MARK, "Сейчас разберу дорожку почтальона и соберу буквы по порядку."):

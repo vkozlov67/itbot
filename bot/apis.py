@@ -14,7 +14,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 RETRY_STATUSES = {408, 409, 429, 500, 502, 503, 504}
-RESPONSE_TIMEOUT = 600.0  # seconds a Grok answer may take (hard puzzles with reasoning take minutes)
+RESPONSE_TIMEOUT = 900.0  # seconds a Grok answer may take (a hard puzzle took grok-4.7 6-12 minutes)
 NON_CHAT_MARKERS = ("imagine", "image", "video", "voice", "tts", "stt", "transcribe", "embed")
 # Containers OpenAI's transcription endpoint accepts (by filename extension).
 OPENAI_AUDIO_EXTS = {"flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "wav", "webm"}
@@ -220,15 +220,17 @@ class XAIClient(_JsonAPI):
                 raise APIError(self.provider, None, "видео не готово за 10 минут")
 
     async def respond(self, model: str, items: list[dict[str, Any]], *, search: bool = True,
-                      max_turns: int = 5) -> ChatResult:
-        """Responses API with server-side web + X search; Grok decides itself when to search."""
+                      max_turns: int = 5, effort: str | None = None) -> ChatResult:
+        """Responses API with server-side web + X search; Grok decides itself when to search.
+        `effort`: reasoning depth for this call (None = the client's reasoning_effort)."""
         body: dict[str, Any] = {"model": model, "input": items, "store": False}
         if search:
             body["tools"] = [{"type": "web_search"}, {"type": "x_search"}]
             body["max_turns"] = max_turns
             body["include"] = ["no_inline_citations"]
-        if self.reasoning_effort:
-            body["reasoning"] = {"effort": self.reasoning_effort}
+        effort = self.reasoning_effort if effort is None else effort
+        if effort:
+            body["reasoning"] = {"effort": effort}
         # Reasoning models may think for minutes: wait long, and never re-run a request that timed out
         # (it would take as long again and be billed twice).
         payload = await self._request("POST", "/responses", json=body, attempts=2, retry_timeouts=False,

@@ -315,12 +315,12 @@ def gave_up(text: str) -> bool:
 
 
 async def _ask_model(app: App, model: str, items: list[dict], items_no_images: list[dict] | None,
-                     *, search: bool = True) -> ChatResult:
+                     *, search: bool = True, effort: str | None = None) -> ChatResult:
     """Responses API with search; on rejection retry without images, then plain chat completions."""
     attempts = [items] + ([items_no_images] if items_no_images else [])
     for attempt in attempts:
         try:
-            return await app.xai.respond(model, attempt, search=search)
+            return await app.xai.respond(model, attempt, search=search, effort=effort)
         except APIError as exc:
             if exc.status not in RETRYABLE_WITHOUT:
                 raise
@@ -477,8 +477,9 @@ async def answer(bot: Bot, app: App, message: Message, question: str, *, place: 
             return [{"role": "system", "content": prompt}, {"role": "user", "content": content}]
 
         async def ask(model: str, prompt: str) -> ChatResult:
+            effort = (app.cfg.hard_effort or None) if model == app.cfg.hard_model else None
             return await _ask_model(app, model, build(True, prompt), build(False, prompt) if images else None,
-                                    search=search)
+                                    search=search, effort=effort)
 
         note = asyncio.create_task(_thinking_note(bot, message))
         try:
