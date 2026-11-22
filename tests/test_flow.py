@@ -835,3 +835,49 @@ def test_hard_questions_go_to_the_strong_model(env):
         assert models == ["grok-4.7"] and chat.ESCALATE_MARK not in xai.chats[0][1][0]["content"]
 
     run(scenario())
+
+
+def test_teased_people_get_sarcasm_unnoticed(env):
+    from datetime import datetime, timezone as tz
+
+    bot, dp, app, session, xai = env
+    BULLY = User(id=7, is_bot=False, first_name="Twilight", last_name="SpΛrklΞ")
+
+    async def ask(mid, user, text):
+        xai.chats.clear()
+        session.calls.clear()
+        await dp.feed_update(bot, upd(message=Message(
+            message_id=mid, date=datetime.now(tz.utc), chat=GROUP, from_user=user, text=f"@it_test_bot {text}",
+            entities=[MessageEntity(type="mention", offset=0, length=12)])))
+        return xai.chats[-1][1][0]["content"]
+
+    async def scenario():
+        app.db.set_setting("owner_id", str(OWNER.id))
+        await dp.feed_update(bot, added(GROUP, OWNER, admin_member()))
+        assert chat.TEASE_NOTE not in await ask(700, BULLY, "что такое DNS?")
+        # the owner finds the person by part of the name, in private only
+        session.calls.clear()
+        await dp.feed_update(bot, upd(message=private_msg(OWNER, "/tease spλr", mid=701)))
+        view = session.sent()[-1]
+        buttons = [b for row in view.reply_markup.inline_keyboard for b in row]
+        pick = next(b for b in buttons if b.text.startswith("😏 Twilight"))
+        panel_msg = Message(message_id=902, date=NOW, chat=Chat(id=OWNER.id, type="private"), from_user=ME, text="x")
+        await dp.feed_update(bot, upd(callback_query=CallbackQuery(
+            id="t1", from_user=OWNER, chat_instance="i", message=panel_msg, data=pick.callback_data)))
+        assert app.teased() == {BULLY.id: "Twilight SpΛrklΞ"}
+        # now the answers to them are sarcastic; nothing about it shows up in the group
+        session.calls.clear()
+        assert chat.TEASE_NOTE in await ask(703, BULLY, "что такое DNS?")
+        assert not any("сарказ" in m.text.lower() or "😏" in m.text for m in session.sent())
+        assert chat.TEASE_NOTE not in await ask(704, STRANGER, "что такое DNS?")
+        # strangers can't use the command
+        session.calls.clear()
+        await dp.feed_update(bot, upd(message=private_msg(STRANGER, "/tease Owner", mid=705)))
+        assert not any("Сарказм" in m.text for m in session.sent())
+        # removing
+        await dp.feed_update(bot, upd(callback_query=CallbackQuery(
+            id="t2", from_user=OWNER, chat_instance="i", message=panel_msg,
+            data=Panel(a="untease", v=str(BULLY.id)).pack())))
+        assert app.teased() == {}
+
+    run(scenario())

@@ -305,6 +305,17 @@ class Database:
             ).fetchall()
         return [StoredMessage(**dict(r)) for r in reversed(rows)]
 
+    def find_authors(self, query: str, limit: int = 8) -> list[tuple[int, str, int]]:
+        """People seen in chats whose name contains `query` (or whose id is `query`): (user_id, name, messages)."""
+        rows = self._conn.execute(
+            "SELECT user_id, author, COUNT(*) AS n, MAX(message_id) AS last FROM messages "
+            "WHERE user_id IS NOT NULL AND kind NOT IN ('bot', 'summary') GROUP BY user_id ORDER BY n DESC"
+        ).fetchall()
+        q = query.strip().casefold()
+        found = [(r["user_id"], r["author"], r["n"]) for r in rows
+                 if q and (q in r["author"].casefold() or q == str(r["user_id"]))]
+        return found[:limit]
+
     def messages_since(self, chat_id: int, since_ts: int, limit: int = HISTORY_KEEP) -> list[StoredMessage]:
         rows = self._conn.execute(
             "SELECT * FROM messages WHERE chat_id=? AND date>=? ORDER BY message_id DESC LIMIT ?",

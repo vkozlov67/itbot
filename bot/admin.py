@@ -136,7 +136,7 @@ async def home_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
     rows = [[btn(f"{mark(c)} {c.title or c.chat_id}"[:60], a="chat", c=c.chat_id)] for c in chats]
     rows.append([InlineKeyboardButton(text="➕ Добавить в группу", url=app.add_to_group_link())])
     rows.append([btn("🤖 Модель", a="models"), btn("🍪 Cookies", a="cookies")])
-    rows.append([btn("🔄 Обновить", a="home")])
+    rows.append([btn("😏 Сарказм", a="tease"), btn("🔄 Обновить", a="home")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -264,6 +264,27 @@ async def models_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def tease_view(app: App, query: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    people = app.teased()
+    lines = [
+        "<b>😏 Сарказм</b>",
+        "",
+        "Этим людям бот отвечает язвительно, а иногда и не по делу — как будто у него такой характер. "
+        "В чате это никак не видно: ни команд, ни пометок.",
+        "",
+        ("Сейчас: " + ", ".join(f"<b>{esc(n)}</b>" for n in people.values())) if people else "Сейчас: никто.",
+        "",
+        "Добавить: <code>/tease имя</code> (или часть имени, как в чате). Нажмите на человека, чтобы убрать.",
+    ]
+    rows = [[btn(f"❌ {name}"[:60], a="untease", v=str(uid))] for uid, name in people.items()]
+    if query:
+        found = [f for f in app.db.find_authors(query) if f[0] not in people]
+        lines += ["", f"Найдено по «{esc(query)}»:" if found else f"По «{esc(query)}» никого не нашёл в чатах."]
+        rows += [[btn(f"😏 {name} · {n} сообщ."[:60], a="tease", v=str(uid))] for uid, name, n in found]
+    rows.append([btn("⬅️ Назад", a="home")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def cookies_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
     services = ", ".join(name for name, _ in SERVICES)
     domains = cookie_domains(app.cookies_path) if app.cookies_path.exists() else []
@@ -355,6 +376,14 @@ async def on_panel(message: Message, app: App) -> None:
     await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
+@router.message(Command("tease"), F.chat.type == "private")
+async def on_tease(message: Message, command: CommandObject, app: App) -> None:
+    if not app.is_owner(message.from_user):
+        return
+    text, markup = tease_view(app, (command.args or "").strip())
+    await message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
 @router.message(Command("reset"), F.chat.type == "private")
 async def on_reset(message: Message, app: App) -> None:
     if not app.is_owner(message.from_user):
@@ -423,6 +452,25 @@ async def on_panel_cb(cb: CallbackQuery, callback_data: Panel, bot: Bot, app: Ap
     if a == "cookies":
         await _ack(cb)
         await _show(cb, *cookies_view(app))
+        return
+
+    if a == "tease" and callback_data.v:
+        uid = int(callback_data.v)
+        found = app.db.find_authors(str(uid), limit=1)
+        app.set_teased(uid, found[0][1] if found else str(uid))
+        await _ack(cb, "Добавлен")
+        await _show(cb, *tease_view(app))
+        return
+
+    if a == "tease":
+        await _ack(cb)
+        await _show(cb, *tease_view(app))
+        return
+
+    if a == "untease":
+        app.set_teased(int(callback_data.v), None)
+        await _ack(cb, "Убран")
+        await _show(cb, *tease_view(app))
         return
 
     if a == "ckdel":

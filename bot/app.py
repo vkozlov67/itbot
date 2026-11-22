@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import time
@@ -84,6 +85,21 @@ class App:
 
     def chat_model(self) -> str:
         return self.db.get_setting("chat_model") or self.cfg.chat_model
+
+    def teased(self) -> dict[int, str]:
+        """People the bot answers with sarcasm: {user_id: name}. Set by the owner in /panel → 😏."""
+        try:
+            return {int(k): v for k, v in json.loads(self.db.get_setting("teased") or "{}").items()}
+        except (ValueError, AttributeError):
+            return {}
+
+    def set_teased(self, user_id: int, name: str | None) -> None:
+        people = self.teased()
+        if name is None:
+            people.pop(user_id, None)
+        else:
+            people[user_id] = name
+        self.db.set_setting("teased", json.dumps({str(k): v for k, v in people.items()}, ensure_ascii=False))
 
     def hard_model(self) -> str:
         """Model for hard questions (puzzles, multi-step logic); "" when off or the same as the chat model."""
