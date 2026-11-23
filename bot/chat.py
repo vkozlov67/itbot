@@ -22,7 +22,7 @@ from .app import App, send_reply, thread_id
 from .db import StoredMessage
 from .textutil import esc, md_to_html, split_text
 from .apis import APIError, ChatResult, to_chat_messages
-from .downloader import Download, DownloadError, Link, download, find_links
+from .downloader import SERVICE_DOMAINS, Download, DownloadError, Link, download, find_links, signed_out_sites
 
 log = logging.getLogger(__name__)
 router = Router(name="chat")
@@ -531,7 +531,21 @@ DL_HINTS = {
             "(как его получить — в /panel → 🍪 Cookies).",
     "blocked": "{service} блокирует сервер бота. Иногда помогает cookies.txt (/panel → 🍪 Cookies).",
     "failed": "Не получилось скачать по ссылке из {service}.",
+    "signed_out": "{service} не отдаёт это видео без входа в аккаунт, а в присланных cookies для {service} входа нет — "
+                  "файл выгружен из браузера, где вы не вошли на сайт. Войдите на сайт в браузере и пришлите "
+                  "cookies.txt заново (/panel → 🍪 Cookies).",
 }
+
+
+def _download_hint(app: App, service: str, reason: str) -> str:
+    if reason in ("auth", "blocked") and SERVICE_DOMAINS.get(service):
+        try:
+            text = app.cookies_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if SERVICE_DOMAINS[service] in signed_out_sites(text):
+            reason = "signed_out"
+    return DL_HINTS.get(reason, DL_HINTS["failed"]).format(service=service)
 
 
 async def _react(bot: Bot, message: Message, emoji: str | None) -> None:
@@ -661,7 +675,7 @@ async def download_links(bot: Bot, app: App, message: Message, links: list[Link]
             if exc.reason == "too_big":
                 await send_reply(bot, message, "📥 Видео больше 50 МБ — Telegram не даёт ботам отправлять такие файлы.")
                 continue
-            hint = DL_HINTS.get(exc.reason, DL_HINTS["failed"]).format(service=link.service)
+            hint = _download_hint(app, link.service, exc.reason)
             await app.notify_owner(
                 bot, f"📥 {esc(hint)}\n<code>{esc(exc.detail[:300])}</code>",
                 throttle_key=f"dl:{link.service}:{exc.reason}",

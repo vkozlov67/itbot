@@ -478,6 +478,33 @@ def _cookie_domain(line: str) -> str | None:
     return parts[0].lstrip(".").removeprefix("www.").lower() if len(parts) >= 7 else None
 
 
+# Cookies that exist only while signed in: a file exported from a signed-out browser has the site's
+# visitor cookies but none of these, and the site treats it as no cookies at all.
+LOGIN_COOKIES = {
+    "youtube.com": {"SID", "__Secure-1PSID", "__Secure-3PSID", "LOGIN_INFO", "SAPISID"},
+    "tiktok.com": {"sessionid", "sessionid_ss", "sid_tt"},
+    "instagram.com": {"sessionid"},
+    "threads.com": {"sessionid"},
+    "threads.net": {"sessionid"},
+    "x.com": {"auth_token"},
+    "reddit.com": {"reddit_session"},
+}
+SERVICE_DOMAINS = {"YouTube": "youtube.com", "TikTok": "tiktok.com", "Instagram": "instagram.com",
+                   "Threads": "threads.com", "X": "x.com", "Reddit": "reddit.com"}
+
+
+def signed_out_sites(text: str) -> list[str]:
+    """Sites that have cookies in `text` but no sign-in cookie among them."""
+    names: dict[str, set[str]] = {}
+    for line in text.splitlines():
+        domain = _cookie_domain(line)
+        if domain:
+            site = next((s for s in LOGIN_COOKIES if domain == s or domain.endswith("." + s)), None)
+            if site:
+                names.setdefault(site, set()).add(line.split("\t")[5])
+    return sorted(site for site, have in names.items() if not have & LOGIN_COOKIES[site])
+
+
 def merge_cookies(old: str, new: str) -> str:
     """Add an uploaded cookies.txt to the stored one: sites in the new file replace the same sites
     in the old file, everything else is kept (so cookies can be sent one site at a time)."""

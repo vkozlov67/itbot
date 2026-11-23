@@ -22,7 +22,7 @@ from .app import App
 from .db import ChatRow
 from .textutil import esc, fmt_duration, fmt_tokens
 from .apis import APIError
-from .downloader import SERVICES, cookie_domains, looks_like_cookies, merge_cookies
+from .downloader import SERVICES, cookie_domains, looks_like_cookies, merge_cookies, signed_out_sites
 
 log = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -288,6 +288,10 @@ def tease_view(app: App, query: str = "") -> tuple[str, InlineKeyboardMarkup]:
 def cookies_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
     services = ", ".join(name for name, _ in SERVICES)
     domains = cookie_domains(app.cookies_path) if app.cookies_path.exists() else []
+    try:
+        signed_out = signed_out_sites(app.cookies_path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        signed_out = []
     lines = [
         "<b>🍪 Cookies для скачивания видео</b>",
         "",
@@ -304,8 +308,12 @@ def cookies_view(app: App) -> tuple[str, InlineKeyboardMarkup]:
         "3. Пришлите файл <code>cookies.txt</code> сюда, в личку боту. Файлы добавляются: можно присылать "
         "по одному на сайт, новый файл заменяет cookies только тех сайтов, что в нём есть.",
         "",
-        "Сейчас: " + (", ".join(esc(d) for d in domains[:15]) if domains else "cookies не загружены"),
+        "Сейчас: " + (", ".join(esc(d) + (" ⚠️ без входа" if d in signed_out else "") for d in domains[:15])
+                      if domains else "cookies не загружены"),
     ]
+    if signed_out:
+        lines.append("⚠️ «Без входа» — файл выгружен из браузера, где вы не вошли на сайт: такие cookies не помогают. "
+                     "Войдите на сайт и выгрузите cookies заново.")
     rows = []
     if app.cookies_path.exists():
         rows.append([btn("🗑 Удалить cookies", a="ckdel")])
@@ -421,8 +429,14 @@ async def on_cookies_file(message: Message, bot: Bot, app: App) -> None:
     tmp.replace(app.cookies_path)
     domains = cookie_domains(app.cookies_path)
     log.info("cookies updated: %d domains", len(domains))
+    signed_out = signed_out_sites(data.decode("utf-8", errors="replace"))
+    warning = (
+        "\n\n⚠️ Для " + ", ".join(f"<b>{esc(s)}</b>" for s in signed_out) + " в файле нет входа в аккаунт — "
+        "похоже, он выгружен из браузера, где вы не вошли на этот сайт. Такие cookies сайт не принимает: "
+        "войдите на сайт в браузере и выгрузите cookies заново." if signed_out else ""
+    )
     await message.answer(
-        "🍪 Cookies сохранены. Сайты: " + (", ".join(esc(d) for d in domains[:20]) or "—")
+        "🍪 Cookies сохранены. Сайты: " + (", ".join(esc(d) for d in domains[:20]) or "—") + warning
         + "\n\nСообщение с файлом лучше удалить из чата.",
         parse_mode="HTML",
     )

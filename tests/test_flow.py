@@ -881,3 +881,12 @@ def test_teased_people_get_sarcasm_unnoticed(env):
         assert app.teased() == {}
 
     run(scenario())
+
+
+def test_download_hint_names_signed_out_cookies(env):
+    bot, dp, app, session, xai = env
+    assert "Пришлите мне в личку файл cookies.txt" in chat._download_hint(app, "YouTube", "auth")
+    app.cookies_path.write_text("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tPREF\tx\n")
+    assert "входа нет" in chat._download_hint(app, "YouTube", "auth")
+    assert "входа нет" not in chat._download_hint(app, "TikTok", "auth")
+    assert "входа нет" not in chat._download_hint(app, "YouTube", "failed")

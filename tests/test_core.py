@@ -555,3 +555,18 @@ def test_search_only_when_asked_for_picture_questions():
     assert search_wanted("найди, что это за модель телефона", True)
     assert search_wanted("погугли эту ошибку", True)
     assert search_wanted("сколько это стоит сейчас?", True)
+
+
+
+def test_signed_out_cookies_are_spotted():
+    from bot.downloader import signed_out_sites
+
+    def line(domain, name):
+        return f"{domain}\tTRUE\t/\tTRUE\t0\t{name}\tv"
+
+    visitor = "\n".join([line(".youtube.com", "PREF"), line(".youtube.com", "VISITOR_INFO1_LIVE"),
+                          line(".tiktok.com", "sessionid"), line(".www.instagram.com", "csrftoken")])
+    assert signed_out_sites(visitor) == ["instagram.com", "youtube.com"]
+    signed_in = visitor + "\n" + line(".youtube.com", "__Secure-3PSID") + "\n#HttpOnly_" + line(".instagram.com", "sessionid")
+    assert signed_out_sites(signed_in) == []
+    assert signed_out_sites("") == []
