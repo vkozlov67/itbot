@@ -271,6 +271,21 @@ class XAIClient(_JsonAPI):
             searches=searches,
         )
 
+    STT_FORMAT_LANGS = {"ar", "de", "en", "es", "fr", "ja", "pt", "ru", "sv", "vi", "zh"}
+
+    async def transcribe(self, audio: bytes, filename: str, mime: str, language: str = "") -> Transcript:
+        """Grok speech to text (POST /v1/stt; OGG/Opus and MP4 are detected from the file itself)."""
+        data: dict[str, str] = {}
+        if language:
+            data["language"] = language
+            if language.split("-")[0].lower() in self.STT_FORMAT_LANGS:
+                data["format"] = "true"  # "двадцать три рубля" → "23 рубля"
+        # The file must be the last multipart field: httpx writes `data` fields before `files`.
+        payload = await self._request("POST", "/stt", data=data, files={"file": (filename, audio, mime)})
+        if not isinstance(payload, dict):
+            raise APIError(self.provider, None, "неожиданный ответ")
+        return Transcript(text=str(payload.get("text") or "").strip(), language=str(payload.get("language") or ""))
+
     async def list_chat_models(self) -> list[str]:
         payload = await self._request("GET", "/models", attempts=2)
         items = payload.get("data", []) if isinstance(payload, dict) else []

@@ -1,5 +1,6 @@
 """End-to-end handler tests: real Dispatcher + routers, fake Telegram session and fake xAI."""
 import asyncio
+import dataclasses
 import datetime as dt
 from pathlib import Path
 
@@ -77,8 +78,12 @@ class FakeXAI:
         self.chats = []
         self.efforts = []
 
+    transcribe_error = None
+
     async def transcribe(self, audio, filename, mime, language=""):
         self.transcribed.append((audio, filename, mime))
+        if self.transcribe_error is not None:
+            raise self.transcribe_error
         return Transcript(text="Встречаемся завтра в 10 утра у офиса", language="ru")
 
     last_search = None
@@ -890,3 +895,38 @@ def test_download_hint_names_signed_out_cookies(env):
     assert "входа нет" in chat._download_hint(app, "YouTube", "auth")
     assert "входа нет" not in chat._download_hint(app, "TikTok", "auth")
     assert "входа нет" not in chat._download_hint(app, "YouTube", "failed")
+
+
+
+def test_voice_is_transcribed_by_grok_with_openai_fallback(env):
+    from bot.apis import APIError
+
+    bot, dp, app, session, xai = env
+    openai = FakeXAI()
+    app.stt = openai
+    assert app.cfg.stt_provider == "xai"
+
+    async def voice(mid):
+        session.calls.clear()
+        v = Voice(file_id=f"V{mid}", file_unique_id=f"v{mid}", duration=4, mime_type="audio/ogg", file_size=5000)
+        await dp.feed_update(bot, upd(message=Message(message_id=mid, date=NOW, chat=GROUP, from_user=STRANGER, voice=v)))
+        return [m.text for m in session.sent()]
+
+    async def scenario():
+        app.db.set_setting("owner_id", str(OWNER.id))
+        await dp.feed_update(bot, added(GROUP, OWNER, admin_member()))
+        texts = await voice(800)
+        assert len(xai.transcribed) == 1 and not openai.transcribed
+        assert any("Встречаемся завтра" in t for t in texts)
+        # xAI out of credits: OpenAI transcribes, the owner is told about the xAI key
+        xai.transcribe_error = APIError("xAI", 402, "insufficient credits")
+        texts = await voice(801)
+        assert len(openai.transcribed) == 1 and any("Встречаемся завтра" in t for t in texts)
+        assert any("ключом xAI" in m.text for m in session.sent() if m.chat_id == OWNER.id)
+        # STT_PROVIDER=openai: Grok is not asked at all
+        app.cfg = dataclasses.replace(app.cfg, stt_provider="openai")
+        xai.transcribe_error = None
+        await voice(802)
+        assert len(xai.transcribed) == 2 and len(openai.transcribed) == 2
+
+    run(scenario())

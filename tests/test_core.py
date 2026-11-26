@@ -570,3 +570,30 @@ def test_signed_out_cookies_are_spotted():
     signed_in = visitor + "\n" + line(".youtube.com", "__Secure-3PSID") + "\n#HttpOnly_" + line(".instagram.com", "sessionid")
     assert signed_out_sites(signed_in) == []
     assert signed_out_sites("") == []
+
+
+
+def test_xai_transcribe_sends_multipart_with_file_last():
+    import asyncio
+    import httpx
+    from bot.apis import XAIClient
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.read()
+        seen.update(path=request.url.path, body=body, ctype=request.headers["content-type"])
+        return httpx.Response(200, json={"text": " Встречаемся в 10 ", "language": "ru", "duration": 3.2})
+
+    async def go():
+        c = XAIClient("KEY", "https://api.x.ai/v1")
+        c._http = httpx.AsyncClient(base_url="https://api.x.ai/v1", transport=httpx.MockTransport(handler))
+        t = await c.transcribe(b"OggS-audio", "voice.ogg", "audio/ogg", "ru")
+        assert (t.text, t.language) == ("Встречаемся в 10", "ru")
+        assert seen["path"] == "/v1/stt" and seen["ctype"].startswith("multipart/form-data")
+        body = seen["body"]
+        assert body.index(b'name="language"') < body.index(b'name="format"') < body.index(b'name="file"')
+        await c.transcribe(b"OggS-audio", "voice.ogg", "audio/ogg")
+        assert b'name="language"' not in seen["body"] and b'name="format"' not in seen["body"]
+
+    asyncio.run(go())

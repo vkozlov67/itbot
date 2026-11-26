@@ -47,6 +47,7 @@ class Config:
     summary_time: str
     context_messages: int
     max_parallel_requests: int
+    stt_provider: str = "xai"  # "xai" (Grok, OpenAI as fallback) or "openai"
     hard_model: str = "grok-4.7"  # stronger model for hard questions; "" = off
     image_model: str = "grok-imagine-image-2.0"
     video_model: str = "grok-imagine-video-1.5-lite"
@@ -85,6 +86,7 @@ class Config:
             hard_model=os.environ.get("HARD_MODEL", "grok-4.7").strip(),
             stt_model=os.environ.get("STT_MODEL", "").strip() or "gpt-transcribe",
             stt_language=os.environ.get("STT_LANGUAGE", "").strip(),
+            stt_provider="openai" if os.environ.get("STT_PROVIDER", "").strip().lower() == "openai" else "xai",
             xai_base_url=os.environ.get("XAI_BASE_URL", "").strip() or "https://api.x.ai/v1",
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "").strip() or "https://api.openai.com/v1",
             data_dir=data_dir,

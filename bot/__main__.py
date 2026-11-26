@@ -64,8 +64,9 @@ async def main() -> None:
         me = await bot.get_me()
         app = App(cfg=cfg, db=db, xai=xai, stt=stt, me=me, sem=asyncio.Semaphore(cfg.max_parallel_requests),
                   tts=tts)
-        log.info("started as @%s (id %s), chat model %s (hard: %s), stt model %s, tts %s, group privacy %s",
-                 me.username, me.id, app.chat_model(), app.hard_model() or "-", cfg.stt_model,
+        log.info("started as @%s (id %s), chat model %s (hard: %s), stt %s, tts %s, group privacy %s",
+                 me.username, me.id, app.chat_model(), app.hard_model() or "-",
+                 "xAI (OpenAI fallback)" if cfg.stt_provider == "xai" else f"OpenAI {cfg.stt_model}",
                  f"ElevenLabs {cfg.elevenlabs_model}" if tts else f"OpenAI {cfg.tts_model}",
                  "off" if me.can_read_all_group_messages else "ON (non-admin groups see only commands/replies)")
         if app.owner_id is None:

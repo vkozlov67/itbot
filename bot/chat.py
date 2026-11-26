@@ -21,7 +21,7 @@ from .admin import chat_actions_markup
 from .app import App, send_reply, thread_id
 from .db import StoredMessage
 from .textutil import esc, md_to_html, split_text
-from .apis import APIError, ChatResult, to_chat_messages
+from .apis import APIError, ChatResult, Transcript, to_chat_messages
 from .downloader import SERVICE_DOMAINS, Download, DownloadError, Link, download, find_links, signed_out_sites
 
 log = logging.getLogger(__name__)
@@ -158,6 +158,21 @@ def _alert_if_account_problem(bot: Bot, app: App, exc: APIError):
 
 
 # ---------------------------------------------------------------- transcription
+async def _transcribe(bot: Bot, app: App, audio: bytes, filename: str, mime: str) -> Transcript:
+    """Grok speech to text; if xAI fails, the same audio goes to OpenAI (and the owner hears about key problems)."""
+    if app.cfg.stt_provider == "xai":
+        try:
+            return await app.xai.transcribe(audio, filename, mime, app.cfg.stt_language)
+        except APIError as exc:
+            if not app.cfg.openai_api_key:
+                raise
+            log.warning("xAI transcription failed (%s), falling back to OpenAI", exc)
+            alert = _alert_if_account_problem(bot, app, exc)
+            if alert:
+                await alert
+    return await app.stt.transcribe(audio, filename, mime, app.cfg.stt_language)
+
+
 async def get_transcript(bot: Bot, app: App, msg: Message) -> tuple[str, float]:
     speech = speech_of(msg)
     if speech is None:
@@ -178,9 +193,9 @@ async def get_transcript(bot: Bot, app: App, msg: Message) -> tuple[str, float]:
                 raise UserError("файл больше 20 МБ — Telegram не даёт ботам скачивать такие файлы") from exc
             raise
         assert buf is not None
-        filename, mime = SPEECH_FILES[kind]  # sent as-is: Telegram's OGG/Opus and MP4 are accepted by OpenAI
+        filename, mime = SPEECH_FILES[kind]  # sent as-is: Telegram's OGG/Opus and MP4 are accepted by both APIs
         async with app.sem:
-            t = await app.stt.transcribe(buf.getvalue(), filename, mime, app.cfg.stt_language)
+            t = await _transcribe(bot, app, buf.getvalue(), filename, mime)
         app.db.add_usage(chat_id, stt_count=1, stt_seconds=duration)
         text = t.text or NO_SPEECH
         app.db.add_message(
